@@ -9,6 +9,7 @@ from .config import DEFAULT_SETTINGS, deep_merge
 from .db import Database, utc_now
 from .errors import ConflictError, InvalidError, NotFoundError
 from .paths import canonical_path, is_within, path_key
+from .source_config import validate_source_config
 
 SETTINGS_SECTIONS = {"scan", "scraping", "playback"}
 SORT_ORDERS = {
@@ -128,6 +129,118 @@ class Store:
         data["enabled"] = bool(data["enabled"])
         return data
 
+    # ------------------------------------------------------------------- sources
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sources ORDER BY priority ASC, name ASC"
+            ).fetchall()
+        return [self._source_dict(row) for row in rows]
+
+    def get_source(self, source_id: int) -> dict[str, Any]:
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("刮削源不存在")
+        return self._source_dict(row)
+
+    def create_source(self, config: dict[str, Any]) -> dict[str, Any]:
+        normalized = validate_source_config(config)
+        name = normalized["name"]
+        with self.db.connection() as conn:
+            if conn.execute("SELECT 1 FROM sources WHERE name=?", (name,)).fetchone():
+                raise ConflictError(f"源名称已存在: {name}")
+            now = utc_now()
+            cur = conn.execute(
+                "INSERT INTO sources(name, enabled, priority, version, config_json, "
+                "builtin, created_at, updated_at) VALUES(?, ?, ?, 1, ?, 0, ?, ?)",
+                (
+                    name,
+                    int(normalized["enabled"]),
+                    normalized["priority"],
+                    json.dumps(normalized, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            source_id = int(cur.lastrowid)
+        return self.get_source(source_id)
+
+    def update_source(self, source_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_source(source_id)
+        if existing["builtin"]:
+            raise ConflictError("内置源不可编辑，只能启用/禁用或调整优先级")
+        normalized = validate_source_config(config)
+        with self.db.connection() as conn:
+            duplicate = conn.execute(
+                "SELECT 1 FROM sources WHERE name=? AND id<>?",
+                (normalized["name"], source_id),
+            ).fetchone()
+            if duplicate:
+                raise ConflictError(f"源名称已存在: {normalized['name']}")
+            conn.execute(
+                "UPDATE sources SET name=?, enabled=?, priority=?, version=version+1, "
+                "config_json=?, updated_at=? WHERE id=?",
+                (
+                    normalized["name"],
+                    int(normalized["enabled"]),
+                    normalized["priority"],
+                    json.dumps(normalized, ensure_ascii=False),
+                    utc_now(),
+                    source_id,
+                ),
+            )
+        return self.get_source(source_id)
+
+    def delete_source(self, source_id: int) -> None:
+        source = self.get_source(source_id)
+        if source["builtin"]:
+            raise ConflictError("内置源不可删除，只能禁用")
+        with self.db.connection() as conn:
+            conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+
+    def update_source_state(
+        self, source_id: int, *, enabled: bool | None = None, priority: int | None = None
+    ) -> dict[str, Any]:
+        source = self.get_source(source_id)
+        if enabled is None and priority is None:
+            raise InvalidError("至少需要提供 enabled 或 priority")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise InvalidError("enabled 必须是布尔值")
+        if priority is not None and (
+            isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100000
+        ):
+            raise InvalidError("priority 必须是 0-100000 的整数")
+        config = dict(source["config"])
+        if enabled is not None:
+            config["enabled"] = enabled
+            source["enabled"] = enabled
+        if priority is not None:
+            config["priority"] = priority
+            source["priority"] = priority
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE sources SET enabled=?, priority=?, version=version+1, "
+                "config_json=?, updated_at=? WHERE id=?",
+                (
+                    int(source["enabled"]),
+                    source["priority"],
+                    json.dumps(config, ensure_ascii=False),
+                    utc_now(),
+                    source_id,
+                ),
+            )
+        return self.get_source(source_id)
+
+    @staticmethod
+    def _source_dict(row: Any) -> dict[str, Any]:
+        data = _row_dict(row)
+        data["config"] = _json_load(data.pop("config_json", None), {})
+        data["enabled"] = bool(data["enabled"])
+        data["builtin"] = bool(data["builtin"])
+        return data
+
     # -------------------------------------------------------------------- videos
 
     def load_scan_cache(self, root_id: int) -> dict[str, dict[str, Any]]:
@@ -245,7 +358,8 @@ class Store:
                    v.scan_status, v.created_at, v.updated_at,
                    m.video_id AS metadata_video_id, m.title, m.original_title, m.year,
                    m.code, m.cover_url, m.cover_local, m.scrape_status, m.source_name,
-                   m.last_scraped_at
+                   m.last_scraped_at, m.genres, m.tags, m.actresses, m.studio,
+                   m.release_date, m.runtime_sec
             FROM videos v
             LEFT JOIN metadata m ON m.video_id = v.id
         """
@@ -305,11 +419,18 @@ class Store:
                 "scrape_status": data.pop("scrape_status", None),
                 "source_name": data.pop("source_name", None),
                 "last_scraped_at": data.pop("last_scraped_at", None),
+                "genres": _json_load(data.pop("genres", None), []),
+                "tags": _json_load(data.pop("tags", None), []),
+                "actresses": _json_load(data.pop("actresses", None), []),
+                "studio": data.pop("studio", None),
+                "release_date": data.pop("release_date", None),
+                "runtime_sec": data.pop("runtime_sec", None),
             }
         else:
             for key in (
                 "title", "original_title", "year", "code", "cover_url", "cover_local",
                 "scrape_status", "source_name", "last_scraped_at",
+                "genres", "tags", "actresses", "studio", "release_date", "runtime_sec",
             ):
                 data.pop(key, None)
         data["features"] = features

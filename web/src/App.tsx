@@ -1,335 +1,77 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { api, type Job, type Video, type VideoDetail } from "./api";
+import { DetailDrawer } from "./components/DetailDrawer";
+import { JobBar } from "./components/JobBar";
+import { SettingsPage } from "./components/SettingsPage";
+import { VideoCard } from "./components/VideoCard";
 import {
-  api,
-  type Job,
-  type PlayerInfo,
-  type ScanRoot,
-  type Video,
-  type VideoDetail,
-} from "./api";
+  DatabaseIcon,
+  FilmIcon,
+  MissingIcon,
+  MoonIcon,
+  ScanIcon,
+  SearchIcon,
+  SettingsIcon,
+  SunIcon,
+} from "./components/Icons";
+import { errorMessage } from "./format";
+import { applyTheme, readTheme, type Theme } from "./theme";
 
 const PAGE_SIZE = 60;
 type Filter = "present" | "missing" | "all";
+type View = "library" | "settings";
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+const SORT_OPTIONS = [
+  ["updated_at", "加入时间：近→远"],
+  ["filename", "文件名"],
+  ["year", "年份"],
+  ["code", "番号"],
+] as const;
 
-function codeOf(video: Video): string {
-  const feature = video.features.jav_code;
-  return typeof feature === "string" ? feature : video.metadata?.code ?? "";
-}
-
-function titleOf(video: Video): string {
-  const feature = video.features.title;
-  return (
-    video.metadata?.title ||
-    (typeof feature === "string" ? feature : "") ||
-    video.filename.replace(/\.[^.]+$/, "")
-  );
-}
-
-function yearOf(video: Video): number | null {
-  const feature = video.features.year;
-  if (typeof feature === "number") return feature;
-  return video.metadata?.year ?? null;
-}
-
-function formatSize(bytes: number | null): string {
-  if (!bytes) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-function formatDuration(seconds: number | null): string | null {
-  if (!seconds) return null;
-  const total = Math.round(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function formatDate(value: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function gradient(seed: number): string {
-  const hue = (seed * 47) % 360;
-  return `linear-gradient(155deg, hsl(${hue} 32% 26%), hsl(${(hue + 55) % 360} 28% 11%))`;
-}
-
-function Field({ label, value }: { label: string; value: ReactNode }) {
-  if (value === null || value === undefined || value === "") return null;
-  return (
-    <div className="border-b border-white/5 py-2">
-      <dt className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</dt>
-      <dd className="mt-0.5 break-words text-sm text-zinc-200">{value}</dd>
-    </div>
-  );
-}
-
-function VideoCard({ video, onSelect }: { video: Video; onSelect: (id: number) => void }) {
-  const code = codeOf(video);
-  const title = titleOf(video);
-  const year = yearOf(video);
+function NavButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
-      onClick={() => onSelect(video.id)}
-      className="group block text-left focus:outline-none"
+      onClick={onClick}
+      title={label}
+      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
+        active
+          ? "bg-sky-50 font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-300"
+          : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-white/5"
+      }`}
     >
-      <div className="relative aspect-[2/3] overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-lg shadow-black/30 transition duration-200 group-hover:-translate-y-0.5 group-hover:border-sky-400/50 group-focus-visible:ring-2 group-focus-visible:ring-sky-400">
-        <div className="absolute inset-0" style={{ background: gradient(video.id) }} />
-        {video.metadata?.cover_local ? (
-          <img
-            src={`/api/videos/${video.id}/cover`}
-            alt=""
-            loading="lazy"
-            className="absolute inset-0 h-full w-full object-cover"
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-          />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-4xl font-bold text-white/10">
-            {code || "V"}
-          </div>
-        )}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/10 to-transparent" />
-        <div className="absolute left-2 top-2 flex gap-1">
-          {code && (
-            <span className="rounded bg-sky-500/90 px-1.5 py-0.5 text-[11px] font-semibold text-white">
-              {code}
-            </span>
-          )}
-          {!video.present && (
-            <span className="rounded bg-amber-400/90 px-1.5 py-0.5 text-[11px] font-semibold text-black">
-              缺失
-            </span>
-          )}
-        </div>
-        <div className="absolute inset-x-0 bottom-0 p-3">
-          <div className="line-clamp-2 text-sm font-medium text-white drop-shadow">{title}</div>
-          <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-300">
-            {year && <span>{year}</span>}
-            <span>{formatSize(video.size_bytes)}</span>
-          </div>
-        </div>
-      </div>
+      {icon}
+      <span className="hidden lg:inline">{label}</span>
     </button>
   );
 }
 
-const JOB_LABELS: Record<Job["status"], string> = {
-  queued: "排队中",
-  running: "扫描中",
-  succeeded: "已完成",
-  failed: "失败",
-  canceled: "已取消",
-};
-
-function JobBar({
-  job,
-  onCancel,
-  onDismiss,
-}: {
-  job: Job;
-  onCancel: () => void;
-  onDismiss: () => void;
-}) {
-  const active = job.status === "queued" || job.status === "running";
-  const percent = job.total > 0 ? Math.min(100, Math.round((job.done / job.total) * 100)) : null;
-  return (
-    <div className="border-b border-white/10 bg-zinc-900/60">
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-2 text-sm">
-        <span
-          className={
-            job.status === "failed"
-              ? "font-medium text-red-400"
-              : job.status === "succeeded"
-                ? "font-medium text-emerald-400"
-                : "font-medium text-sky-400"
-          }
-        >
-          {JOB_LABELS[job.status]}
-        </span>
-        <div className="h-1.5 min-w-32 flex-1 overflow-hidden rounded-full bg-zinc-800">
-          {percent === null ? (
-            <div className="h-full w-1/3 animate-pulse rounded-full bg-sky-500" />
-          ) : (
-            <div
-              className="h-full rounded-full bg-sky-500 transition-all"
-              style={{ width: `${percent}%` }}
-            />
-          )}
-        </div>
-        <span className="tabular-nums text-zinc-400">
-          {job.done}/{job.total}
-        </span>
-        <span className="max-w-[45%] truncate text-zinc-400" title={job.message ?? ""}>
-          {job.message}
-        </span>
-        {active ? (
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md border border-white/10 px-2 py-1 text-xs text-zinc-300 hover:bg-white/5"
-          >
-            取消
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="rounded-md border border-white/10 px-2 py-1 text-xs text-zinc-300 hover:bg-white/5"
-          >
-            关闭
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function DetailDrawer({
-  detail,
-  players,
-  onClose,
-  onPlay,
-  onDelete,
-  playing,
-}: {
-  detail: VideoDetail | null;
-  players: PlayerInfo[];
-  onClose: () => void;
-  onPlay: () => void;
-  onDelete: () => void;
-  playing: boolean;
-}) {
-  const video = detail?.video;
-  const metadata = detail?.metadata;
-  return (
-    <div
-      className="fixed inset-0 z-40 flex justify-end bg-black/60 backdrop-blur-sm"
-      onClick={onClose}
-      role="presentation"
-    >
-      <aside
-        className="h-full w-full max-w-md overflow-y-auto border-l border-white/10 bg-zinc-950 p-6 shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold text-white">
-              {video ? titleOf({ ...video, metadata: metadata ?? null } as Video) : "加载中…"}
-            </h2>
-            {metadata?.original_title && (
-              <p className="mt-1 text-sm text-zinc-400">{metadata.original_title}</p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-white/10 px-2 py-1 text-sm text-zinc-400 hover:bg-white/5"
-            aria-label="关闭"
-          >
-            ×
-          </button>
-        </div>
-
-        {!detail || !video ? (
-          <p className="mt-8 text-sm text-zinc-500">正在加载详情…</p>
-        ) : (
-          <>
-            <div className="mt-5 flex flex-wrap gap-2">
-              {codeOf({ ...video, metadata: metadata ?? null } as Video) && (
-                <span className="rounded bg-sky-500/15 px-2 py-1 text-xs font-medium text-sky-300">
-                  {codeOf({ ...video, metadata: metadata ?? null } as Video)}
-                </span>
-              )}
-              {metadata?.year && (
-                <span className="rounded bg-white/5 px-2 py-1 text-xs text-zinc-300">
-                  {metadata.year}
-                </span>
-              )}
-              {!video.present && (
-                <span className="rounded bg-amber-400/15 px-2 py-1 text-xs text-amber-300">文件缺失</span>
-              )}
-            </div>
-
-            <div className="mt-6 flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={onPlay}
-                disabled={playing || !video.present}
-                className="rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {playing ? "正在启动…" : "用本地播放器打开"}
-              </button>
-              <p className="text-center text-[11px] text-zinc-500">
-                {players.length > 0
-                  ? `已检测到：${players.map((player) => player.name).join(" / ")}`
-                  : "未检测到播放器，可在 API 设置中指定路径"}
-              </p>
-            </div>
-
-            <dl className="mt-6">
-              <Field label="文件名" value={video.filename} />
-              <Field label="番号" value={metadata?.code || String(video.features.jav_code ?? "")} />
-              <Field label="大小" value={formatSize(video.size_bytes)} />
-              <Field label="时长" value={formatDuration(video.duration_sec ?? metadata?.runtime_sec ?? null)} />
-              <Field label="来源" value={metadata?.source_name} />
-              <Field label="刮削状态" value={metadata?.scrape_status ?? "pending"} />
-              <Field label="发行日期" value={metadata?.release_date} />
-              <Field label="厂商" value={metadata?.studio} />
-              <Field label="系列" value={metadata?.series} />
-              <Field label="导演" value={metadata?.director} />
-              <Field label="简介" value={metadata?.overview} />
-              <Field label="路径" value={<span className="break-all text-xs text-zinc-400">{video.path}</span>} />
-              <Field label="入库时间" value={formatDate(video.created_at)} />
-              <Field label="最后更新" value={formatDate(video.updated_at)} />
-            </dl>
-
-            <details className="mt-4 rounded-lg border border-white/5 bg-white/[0.02] p-3">
-              <summary className="cursor-pointer text-xs text-zinc-400">提取的特征</summary>
-              <pre className="mt-2 overflow-x-auto text-xs text-zinc-300">
-                {JSON.stringify(video.features, null, 2)}
-              </pre>
-            </details>
-
-            <button
-              type="button"
-              onClick={onDelete}
-              className="mt-8 w-full rounded-lg border border-red-500/30 px-4 py-2 text-xs text-red-400 hover:bg-red-500/10"
-            >
-              从库中删除记录（不删除文件）
-            </button>
-          </>
-        )}
-      </aside>
-    </div>
-  );
+function initialView(): View {
+  const requested = new URLSearchParams(window.location.search).get("view");
+  return requested === "settings" ? "settings" : "library";
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<Theme>(readTheme);
+  const [view, setView] = useState<View>(initialView);
+  const [filter, setFilter] = useState<Filter>("present");
+  const [sort, setSort] = useState<string>("updated_at");
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [videos, setVideos] = useState<Video[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [filter, setFilter] = useState<Filter>("present");
-  const [roots, setRoots] = useState<ScanRoot[]>([]);
-  const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -339,24 +81,10 @@ export default function App() {
   const [detail, setDetail] = useState<VideoDetail | null>(null);
   const [playing, setPlaying] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [newRoot, setNewRoot] = useState("");
-
-  const loadRoots = useCallback(async () => {
-    try {
-      const data = await api.listRoots();
-      setRoots(data.items);
-    } catch (error) {
-      setBanner(errorMessage(error));
-    }
-  }, []);
 
   useEffect(() => {
-    void loadRoots();
-    api
-      .listPlayers()
-      .then((data) => setPlayers(data.players))
-      .catch(() => setPlayers([]));
-  }, [loadRoots]);
+    applyTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
@@ -365,7 +93,7 @@ export default function App() {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedQuery, filter]);
+  }, [debouncedQuery, filter, sort]);
 
   useEffect(() => {
     let cancelled = false;
@@ -376,6 +104,7 @@ export default function App() {
         pageSize: PAGE_SIZE,
         q: debouncedQuery || undefined,
         present: filter === "all" ? undefined : filter === "present",
+        sort,
       })
       .then((data) => {
         if (cancelled) return;
@@ -391,7 +120,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [page, debouncedQuery, filter, refreshKey]);
+  }, [page, debouncedQuery, filter, sort, refreshKey]);
 
   useEffect(() => {
     if (activeJobId === null) return;
@@ -404,7 +133,6 @@ export default function App() {
         if (["succeeded", "failed", "canceled"].includes(current.status)) {
           setActiveJobId(null);
           setRefreshKey((key) => key + 1);
-          void loadRoots();
         }
       } catch (error) {
         if (!stopped) {
@@ -419,7 +147,7 @@ export default function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [activeJobId, loadRoots]);
+  }, [activeJobId]);
 
   useEffect(() => {
     if (selectedId === null) {
@@ -448,15 +176,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const scanning = activeJobId !== null;
-  const activeFilterLabel = useMemo(() => {
-    if (filter === "missing") return "缺失";
-    if (filter === "all") return "全部";
-    return "在库";
-  }, [filter]);
-
-  async function startScan(rootId?: number) {
+  const startScan = useCallback(async (rootId?: number) => {
     setBanner(null);
     try {
       const { job_id } = await api.createScan(rootId);
@@ -478,7 +198,7 @@ export default function App() {
     } catch (error) {
       setBanner(errorMessage(error));
     }
-  }
+  }, []);
 
   async function cancelScan() {
     if (!job) return;
@@ -489,26 +209,10 @@ export default function App() {
     }
   }
 
-  async function addRoot(event: FormEvent) {
-    event.preventDefault();
-    const path = newRoot.trim();
-    if (!path) return;
+  async function playVideo(id: number) {
     try {
-      await api.createRoot(path);
-      setNewRoot("");
-      await loadRoots();
-      setNotice("扫描目录已添加");
-    } catch (error) {
-      setBanner(errorMessage(error));
-    }
-  }
-
-  async function removeRoot(root: ScanRoot) {
-    if (!window.confirm(`移除扫描目录？\n${root.path}\n\n不会删除文件。`)) return;
-    try {
-      await api.deleteRoot(root.id);
-      await loadRoots();
-      setRefreshKey((key) => key + 1);
+      const result = await api.playVideo(id);
+      setNotice(`已用 ${result.player} 启动播放（pid ${result.pid}）`);
     } catch (error) {
       setBanner(errorMessage(error));
     }
@@ -518,21 +222,17 @@ export default function App() {
     if (selectedId === null) return;
     setPlaying(true);
     try {
-      const result = await api.playVideo(selectedId);
-      setNotice(`已用 ${result.player} 启动播放（pid ${result.pid}）`);
-    } catch (error) {
-      setBanner(errorMessage(error));
+      await playVideo(selectedId);
     } finally {
       setPlaying(false);
     }
   }
 
-  async function deleteSelected() {
-    if (selectedId === null) return;
+  async function removeVideo(id: number) {
     if (!window.confirm("从库中删除该记录？不会删除视频文件。")) return;
     try {
-      await api.deleteVideo(selectedId);
-      setSelectedId(null);
+      await api.deleteVideo(id);
+      if (selectedId === id) setSelectedId(null);
       setRefreshKey((key) => key + 1);
       setNotice("记录已删除");
     } catch (error) {
@@ -540,240 +240,226 @@ export default function App() {
     }
   }
 
+  function openLibrary(nextFilter: Filter) {
+    setFilter(nextFilter);
+    setView("library");
+  }
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const scanning = activeJobId !== null;
+  const title =
+    filter === "missing" ? "缺失文件" : filter === "all" ? "全部视频" : "视频库";
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <header className="sticky top-0 z-30 border-b border-white/10 bg-zinc-950/85 backdrop-blur">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-4 px-6 py-3">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500 text-sm font-black text-white">
-              V
-            </div>
-            <span className="text-lg font-semibold tracking-wide">VBob</span>
+    <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col border-r border-zinc-200 bg-white px-2 py-4 lg:w-60 lg:px-3 dark:border-white/10 dark:bg-zinc-900/70">
+        <div className="flex items-center gap-2 px-1.5 py-1">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-500 text-sm font-black text-white shadow-md shadow-sky-500/20">
+            V
           </div>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索标题 / 文件名 / 番号"
-            className="min-w-48 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-sky-400/60 focus:outline-none"
+          <div className="hidden min-w-0 lg:block">
+            <div className="truncate text-sm font-semibold tracking-wide">VBob</div>
+            <div className="text-[10px] text-zinc-500">本地视频库</div>
+          </div>
+        </div>
+
+        <nav className="mt-6 space-y-1">
+          <NavButton
+            icon={<FilmIcon className="h-4 w-4" />}
+            label="视频库"
+            active={view === "library" && filter === "present"}
+            onClick={() => openLibrary("present")}
           />
-          <span className="hidden text-xs text-zinc-500 sm:block">
-            {total} 个视频 · {activeFilterLabel}
-          </span>
-          <button
-            type="button"
-            onClick={() => void startScan()}
-            disabled={scanning || roots.length === 0}
-            className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {scanning ? "扫描中…" : "扫描"}
-          </button>
+          <NavButton
+            icon={<MissingIcon className="h-4 w-4" />}
+            label="缺失文件"
+            active={view === "library" && filter === "missing"}
+            onClick={() => openLibrary("missing")}
+          />
+          <NavButton
+            icon={<DatabaseIcon className="h-4 w-4" />}
+            label="全部视频"
+            active={view === "library" && filter === "all"}
+            onClick={() => openLibrary("all")}
+          />
+        </nav>
+
+        <div className="mt-auto space-y-1 border-t border-zinc-100 pt-3 dark:border-white/5">
+          <NavButton
+            icon={
+              theme === "dark" ? (
+                <SunIcon className="h-4 w-4" />
+              ) : (
+                <MoonIcon className="h-4 w-4" />
+              )
+            }
+            label={theme === "dark" ? "浅色主题" : "深色主题"}
+            active={false}
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          />
+          <NavButton
+            icon={<SettingsIcon className="h-4 w-4" />}
+            label="设置"
+            active={view === "settings"}
+            onClick={() => setView("settings")}
+          />
         </div>
-      </header>
+      </aside>
 
-      {job && <JobBar job={job} onCancel={() => void cancelScan()} onDismiss={() => setJob(null)} />}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {job && (
+          <JobBar job={job} onCancel={() => void cancelScan()} onDismiss={() => setJob(null)} />
+        )}
 
-      {banner && (
-        <div className="mx-auto mt-4 flex max-w-[1600px] items-center justify-between gap-4 px-6">
-          <div className="flex-1 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
-            {banner}
+        {banner && (
+          <div className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300">
+            <span className="min-w-0 flex-1 truncate">{banner}</span>
+            <button
+              type="button"
+              onClick={() => setBanner(null)}
+              className="shrink-0 text-xs underline-offset-2 hover:underline"
+            >
+              关闭
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setBanner(null)}
-            className="rounded-md border border-white/10 px-2 py-1 text-xs text-zinc-400 hover:bg-white/5"
-          >
-            关闭
-          </button>
-        </div>
-      )}
+        )}
 
-      <div className="mx-auto flex max-w-[1600px] items-start gap-6 px-6 py-6">
-        <aside className="w-64 shrink-0 space-y-5">
-          <section className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-            <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              扫描目录
-            </h2>
-            <ul className="mt-2 space-y-1.5">
-              {roots.length === 0 && (
-                <li className="px-1 py-2 text-xs text-zinc-500">还没有扫描目录</li>
-              )}
-              {roots.map((root) => (
-                <li
-                  key={root.id}
-                  className="group rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1.5"
+        {view === "library" ? (
+          <>
+            <header className="sticky top-0 z-30 border-b border-zinc-200 bg-zinc-50/90 backdrop-blur dark:border-white/10 dark:bg-zinc-950/85">
+              <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-3">
+                <div className="mr-2 min-w-24">
+                  <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
+                  <p className="text-[11px] text-zinc-500">{total} 项</p>
+                </div>
+
+                <div className="relative min-w-48 flex-1">
+                  <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="搜索标题 / 文件名 / 番号"
+                    className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-3 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600"
+                  />
+                </div>
+
+                <select
+                  value={sort}
+                  onChange={(event) => setSort(event.target.value)}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-600 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-300"
                 >
-                  <div className="flex items-start gap-1">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs text-zinc-300" title={root.path}>
-                        {root.path}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-zinc-500">
-                        {root.last_scan_at ? `上次扫描 ${formatDate(root.last_scan_at)}` : "尚未扫描"}
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
-                      <button
-                        type="button"
-                        onClick={() => void startScan(root.id)}
-                        disabled={scanning}
-                        title="扫描此目录"
-                        aria-label="扫描此目录"
-                        className="rounded px-1 text-xs text-sky-400 hover:bg-white/5 disabled:opacity-40"
-                      >
-                        ▶
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void removeRoot(root)}
-                        title="移除目录"
-                        aria-label="移除目录"
-                        className="rounded px-1 text-xs text-zinc-500 hover:bg-white/5 hover:text-red-400"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <form onSubmit={(event) => void addRoot(event)} className="mt-3 space-y-2">
-              <input
-                value={newRoot}
-                onChange={(event) => setNewRoot(event.target.value)}
-                placeholder="D:\Media 或 /media/videos"
-                className="w-full rounded-md border border-white/10 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-sky-400/60 focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="w-full rounded-md border border-white/10 px-2 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
-              >
-                添加目录
-              </button>
-            </form>
-          </section>
+                  {SORT_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
 
-          <section className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-            <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              筛选
-            </h2>
-            <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg bg-zinc-900 p-1">
-              {(
-                [
-                  ["present", "在库"],
-                  ["missing", "缺失"],
-                  ["all", "全部"],
-                ] as [Filter, string][]
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setFilter(value)}
-                  className={
-                    filter === value
-                      ? "rounded-md bg-sky-500 px-2 py-1 text-xs font-medium text-white"
-                      : "rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-white/5"
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-            <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              播放器
-            </h2>
-            {players.length === 0 ? (
-              <p className="mt-2 px-1 text-xs text-zinc-500">
-                未检测到播放器。安装 mpv / VLC / PotPlayer 后重启服务。
-              </p>
-            ) : (
-              <ul className="mt-2 space-y-1">
-                {players.map((player) => (
-                  <li key={player.path} className="truncate px-1 text-xs text-zinc-300" title={player.path}>
-                    {player.name}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </aside>
-
-        <main className="min-w-0 flex-1">
-          {loading && videos.length === 0 ? (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-              {Array.from({ length: 12 }).map((_, index) => (
-                <div key={index} className="aspect-[2/3] animate-pulse rounded-xl bg-zinc-900" />
-              ))}
-            </div>
-          ) : videos.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-white/10 px-6 py-24 text-center">
-              <p className="text-sm text-zinc-400">
-                {roots.length === 0
-                  ? "先在左侧添加一个扫描目录。"
-                  : debouncedQuery
-                    ? "没有匹配的视频。"
-                    : "这个目录里还没有扫描到视频。"}
-              </p>
-              {roots.length > 0 && !debouncedQuery && (
                 <button
                   type="button"
                   onClick={() => void startScan()}
                   disabled={scanning}
-                  className="mt-4 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-400 disabled:opacity-40"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  开始扫描
+                  <ScanIcon className="h-4 w-4" />
+                  {scanning ? "扫描中…" : "扫描"}
                 </button>
-              )}
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-              {videos.map((video) => (
-                <VideoCard key={video.id} video={video} onSelect={setSelectedId} />
-              ))}
-            </div>
-          )}
+              </div>
+            </header>
 
-          {total > PAGE_SIZE && (
-            <div className="mt-8 flex items-center justify-center gap-3 text-sm text-zinc-400">
-              <button
-                type="button"
-                onClick={() => setPage((current) => Math.max(1, current - 1))}
-                disabled={page <= 1}
-                className="rounded-md border border-white/10 px-3 py-1.5 hover:bg-white/5 disabled:opacity-30"
-              >
-                上一页
-              </button>
-              <span className="tabular-nums">
-                {page} / {pageCount}
-              </span>
-              <button
-                type="button"
-                onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
-                disabled={page >= pageCount}
-                className="rounded-md border border-white/10 px-3 py-1.5 hover:bg-white/5 disabled:opacity-30"
-              >
-                下一页
-              </button>
-            </div>
-          )}
-        </main>
+            <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-6">
+              {loading && videos.length === 0 ? (
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  {Array.from({ length: 8 }).map((_, index) => (
+                    <div
+                      key={index}
+                      className="h-80 animate-pulse rounded-2xl bg-zinc-200/70 dark:bg-zinc-900"
+                    />
+                  ))}
+                </div>
+              ) : videos.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300 px-6 py-24 text-center dark:border-white/10">
+                  <FilmIcon className="h-10 w-10 text-zinc-300 dark:text-zinc-700" />
+                  <p className="mt-4 text-sm text-zinc-500">
+                    {debouncedQuery
+                      ? "没有匹配的视频"
+                      : filter === "missing"
+                        ? "没有缺失文件"
+                        : "还没有扫描到视频"}
+                  </p>
+                  {!debouncedQuery && filter !== "missing" && (
+                    <button
+                      type="button"
+                      onClick={() => void startScan()}
+                      disabled={scanning}
+                      className="mt-4 rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-400 disabled:opacity-40"
+                    >
+                      开始扫描
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  {videos.map((video) => (
+                    <VideoCard
+                      key={video.id}
+                      video={video}
+                      onSelect={setSelectedId}
+                      onPlay={(id) => void playVideo(id)}
+                      onDelete={(id) => void removeVideo(id)}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {total > PAGE_SIZE && (
+                <div className="mt-8 flex items-center justify-center gap-3 text-sm text-zinc-500">
+                  <button
+                    type="button"
+                    onClick={() => setPage((current) => Math.max(1, current - 1))}
+                    disabled={page <= 1}
+                    className="rounded-md border border-zinc-200 px-3 py-1.5 transition hover:bg-white disabled:opacity-30 dark:border-white/10 dark:hover:bg-white/5"
+                  >
+                    上一页
+                  </button>
+                  <span className="tabular-nums">
+                    {page} / {pageCount}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                    disabled={page >= pageCount}
+                    className="rounded-md border border-zinc-200 px-3 py-1.5 transition hover:bg-white disabled:opacity-30 dark:border-white/10 dark:hover:bg-white/5"
+                  >
+                    下一页
+                  </button>
+                </div>
+              )}
+            </main>
+          </>
+        ) : (
+          <SettingsPage
+            theme={theme}
+            onThemeChange={setTheme}
+            onStartScan={(rootId) => void startScan(rootId)}
+            scanning={scanning}
+            refreshKey={refreshKey}
+          />
+        )}
       </div>
 
       {selectedId !== null && (
         <DetailDrawer
           detail={detail}
-          players={players}
           onClose={() => setSelectedId(null)}
           onPlay={() => void playSelected()}
-          onDelete={() => void deleteSelected()}
+          onDelete={() => void removeVideo(selectedId)}
           playing={playing}
         />
       )}
 
       {notice && (
-        <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-sky-500/30 bg-zinc-900 px-4 py-2 text-sm text-sky-200 shadow-xl">
+        <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-sky-200 bg-white px-4 py-2.5 text-sm text-sky-700 shadow-xl dark:border-sky-500/30 dark:bg-zinc-900 dark:text-sky-300">
           {notice}
         </div>
       )}

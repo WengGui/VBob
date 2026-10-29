@@ -13,7 +13,13 @@ from .jobs import JobManager
 from .paths import is_within, path_key
 from .player import launch, players_payload, resolve_player
 from .scanner import Scanner, ScanOptions
-from .schemas import PlayRequest, ScanRequest, ScanRootCreate, ScanRootUpdate
+from .schemas import (
+    PlayRequest,
+    ScanRequest,
+    ScanRootCreate,
+    ScanRootUpdate,
+    SourceStateUpdate,
+)
 from .store import SORT_ORDERS, Store
 
 router = APIRouter(prefix="/api")
@@ -137,6 +143,39 @@ def get_job(request: Request, job_id: str) -> dict[str, Any]:
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(request: Request, job_id: str) -> dict[str, Any]:
     return _jobs(request).cancel(job_id)
+
+
+# ---------------------------------------------------------------------- sources
+
+
+@router.get("/sources")
+def list_sources(request: Request) -> dict[str, Any]:
+    return {"items": _store(request).list_sources()}
+
+
+@router.post("/sources", status_code=201)
+def create_source(request: Request, config: dict[str, Any]) -> dict[str, Any]:
+    return _store(request).create_source(config)
+
+
+@router.put("/sources/{source_id}")
+def update_source(request: Request, source_id: int, config: dict[str, Any]) -> dict[str, Any]:
+    return _store(request).update_source(source_id, config)
+
+
+@router.patch("/sources/{source_id}")
+def update_source_state(
+    request: Request, source_id: int, body: SourceStateUpdate
+) -> dict[str, Any]:
+    return _store(request).update_source_state(
+        source_id, enabled=body.enabled, priority=body.priority
+    )
+
+
+@router.delete("/sources/{source_id}", status_code=204)
+def delete_source(request: Request, source_id: int) -> Response:
+    _store(request).delete_source(source_id)
+    return Response(status_code=204)
 
 
 # ----------------------------------------------------------------------- videos

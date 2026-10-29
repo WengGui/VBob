@@ -20,3 +20,8 @@ class ScanRequest(BaseModel):
 class PlayRequest(BaseModel):
     player: str | None = None
     seek: float | None = Field(default=None, ge=0)
+
+
+class SourceStateUpdate(BaseModel):
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=0, le=100000)

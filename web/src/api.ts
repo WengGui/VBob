@@ -8,6 +8,12 @@ export interface MetadataSummary {
   scrape_status: string | null;
   source_name: string | null;
   last_scraped_at: string | null;
+  genres: string[];
+  tags: string[];
+  actresses: string[];
+  studio: string | null;
+  release_date: string | null;
+  runtime_sec: number | null;
 }
 
 export interface Video {
@@ -31,12 +37,6 @@ export interface FullMetadata extends MetadataSummary {
   id: number;
   video_id: number;
   overview: string | null;
-  release_date: string | null;
-  runtime_sec: number | null;
-  genres: string[];
-  tags: string[];
-  actresses: string[];
-  studio: string | null;
   series: string | null;
   director: string | null;
   matched_by: string | null;
@@ -77,6 +77,19 @@ export interface PlayerInfo {
   name: string;
   path: string;
   source: string;
+}
+
+export interface Source {
+  id: number;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  version: number;
+  builtin: boolean;
+  config: Record<string, unknown>;
+  last_test_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class ApiError extends Error {
@@ -122,12 +135,14 @@ export const api = {
     pageSize?: number;
     q?: string;
     present?: boolean;
+    sort?: string;
   }): Promise<{ items: Video[]; total: number; page: number; page_size: number }> {
     const search = new URLSearchParams();
     search.set("page", String(params.page ?? 1));
     search.set("page_size", String(params.pageSize ?? 60));
     if (params.q) search.set("q", params.q);
     if (params.present !== undefined) search.set("present", String(params.present));
+    if (params.sort) search.set("sort", params.sort);
     return request(`/api/videos?${search.toString()}`);
   },
 
@@ -178,5 +193,37 @@ export const api = {
 
   cancelJob(id: string): Promise<Job> {
     return request(`/api/jobs/${id}/cancel`, { method: "POST", body: "{}" });
+  },
+
+  listSources(): Promise<{ items: Source[] }> {
+    return request("/api/sources");
+  },
+
+  createSource(config: Record<string, unknown>): Promise<Source> {
+    return request("/api/sources", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  },
+
+  updateSource(id: number, config: Record<string, unknown>): Promise<Source> {
+    return request(`/api/sources/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+  },
+
+  updateSourceState(
+    id: number,
+    patch: { enabled?: boolean; priority?: number },
+  ): Promise<Source> {
+    return request(`/api/sources/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  deleteSource(id: number): Promise<void> {
+    return request(`/api/sources/${id}`, { method: "DELETE" });
   },
 };
