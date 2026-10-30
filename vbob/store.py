@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -8,6 +9,7 @@ from typing import Any, Iterable
 from .config import DEFAULT_SETTINGS, deep_merge
 from .db import Database, utc_now
 from .errors import ConflictError, InvalidError, NotFoundError
+from .names import actress_name_key
 from .paths import canonical_path, is_within, path_key
 from .source_config import validate_source_config
 
@@ -67,27 +69,51 @@ class Store:
 
     # --------------------------------------------------------------- scan roots
 
+    ROOT_SELECT = """
+        SELECT r.*,
+               (SELECT COUNT(*) FROM videos v WHERE v.root_id=r.id AND v.present=1)
+                   AS scanned_count,
+               (SELECT COUNT(*) FROM videos v JOIN metadata m ON m.video_id=v.id
+                WHERE v.root_id=r.id AND v.present=1 AND m.is_complete=1)
+                   AS scraped_count
+        FROM scan_roots r
+    """
+
     def list_roots(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM scan_roots"
+        sql = self.ROOT_SELECT
         if enabled_only:
-            sql += " WHERE enabled=1"
-        sql += " ORDER BY id ASC"
+            sql += " WHERE r.enabled=1"
+        sql += " ORDER BY r.id ASC"
         with self.db.connection() as conn:
             rows = conn.execute(sql).fetchall()
-        return [self._root_dict(row) for row in rows]
+            active = self._active_jobs(conn, [int(row["id"]) for row in rows])
+        result = []
+        for row in rows:
+            data = self._root_dict(row)
+            data["active_job"] = active.get(int(row["id"]))
+            result.append(data)
+        return result
 
     def get_root(self, root_id: int) -> dict[str, Any]:
         with self.db.connection() as conn:
-            row = conn.execute("SELECT * FROM scan_roots WHERE id=?", (root_id,)).fetchone()
-        if row is None:
-            raise NotFoundError("扫描目录不存在")
-        return self._root_dict(row)
+            row = conn.execute(
+                self.ROOT_SELECT + " WHERE r.id=?", (root_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("扫描目录不存在")
+            active = self._active_jobs(conn, [root_id])
+        data = self._root_dict(row)
+        data["active_job"] = active.get(root_id)
+        return data
 
-    def create_root(self, path: str, enabled: bool = True) -> dict[str, Any]:
+    def create_root(
+        self, path: str, enabled: bool = True, scan_interval_minutes: int = 0
+    ) -> dict[str, Any]:
         resolved = canonical_path(path)
         key = path_key(resolved)
         if not Path(resolved).is_dir():
             raise InvalidError(f"目录不存在或不是目录: {resolved}")
+        _validate_interval(scan_interval_minutes)
         with self.db.connection() as conn:
             existing = conn.execute("SELECT id, path, path_key FROM scan_roots").fetchall()
         for row in existing:
@@ -98,15 +124,80 @@ class Store:
         now = utc_now()
         with self.db.connection() as conn:
             cur = conn.execute(
-                "INSERT INTO scan_roots(path, path_key, enabled, created_at) VALUES(?, ?, ?, ?)",
-                (resolved, key, int(enabled), now),
+                "INSERT INTO scan_roots(path, path_key, enabled, scan_interval_minutes, "
+                "last_scan_status, created_at) VALUES(?, ?, ?, ?, 'idle', ?)",
+                (resolved, key, int(enabled), scan_interval_minutes, now),
             )
         return self.get_root(int(cur.lastrowid))
 
-    def update_root(self, root_id: int, *, enabled: bool) -> dict[str, Any]:
-        self.get_root(root_id)
-        with self.db.connection() as conn:
-            conn.execute("UPDATE scan_roots SET enabled=? WHERE id=?", (int(enabled), root_id))
+    def update_root(
+        self,
+        root_id: int,
+        *,
+        enabled: bool | None = None,
+        path: str | None = None,
+        scan_interval_minutes: int | None = None,
+    ) -> dict[str, Any]:
+        root = self.get_root(root_id)
+        if enabled is None and path is None and scan_interval_minutes is None:
+            raise InvalidError("至少需要提供一个要修改的目录设置")
+        if scan_interval_minutes is not None:
+            _validate_interval(scan_interval_minutes)
+        with self.db.transaction() as conn:
+            if path is not None:
+                resolved = canonical_path(path)
+                if not Path(resolved).is_dir():
+                    raise InvalidError(f"目录不存在或不是目录: {resolved}")
+                new_key = path_key(resolved)
+                others = conn.execute(
+                    "SELECT id, path, path_key FROM scan_roots WHERE id<>?", (root_id,)
+                ).fetchall()
+                for other in others:
+                    if other["path_key"] == new_key:
+                        raise ConflictError(f"扫描目录已存在: {other['path']}")
+                    if is_within(new_key, other["path_key"]) or is_within(
+                        other["path_key"], new_key
+                    ):
+                        raise ConflictError(f"扫描目录与已有目录重叠: {other['path']}")
+                if new_key != root["path_key"]:
+                    old_base = root["path"]
+                    videos = conn.execute(
+                        "SELECT id, path FROM videos WHERE root_id=?", (root_id,)
+                    ).fetchall()
+                    planned: list[tuple[int, str, str]] = []
+                    for video in videos:
+                        relative = os.path.relpath(video["path"], old_base)
+                        if relative.startswith(".."):
+                            continue
+                        new_path = canonical_path(os.path.join(resolved, relative))
+                        planned.append((int(video["id"]), new_path, path_key(new_path)))
+                    for _, _, key in planned:
+                        conflict = conn.execute(
+                            "SELECT 1 FROM videos WHERE path_key=? AND root_id<>?",
+                            (key, root_id),
+                        ).fetchone()
+                        if conflict:
+                            raise ConflictError("修改目录后存在路径冲突，请先清理重复记录")
+                    conn.execute(
+                        "UPDATE scan_roots SET path=?, path_key=? WHERE id=?",
+                        (resolved, new_key, root_id),
+                    )
+                    for video_id, new_path, new_path_key in planned:
+                        conn.execute(
+                            "UPDATE videos SET path=?, path_key=?, updated_at=? WHERE id=?",
+                            (new_path, new_path_key, utc_now(), video_id),
+                        )
+            updates: list[str] = []
+            params: list[Any] = []
+            if enabled is not None:
+                updates.append("enabled=?")
+                params.append(int(enabled))
+            if scan_interval_minutes is not None:
+                updates.append("scan_interval_minutes=?")
+                params.append(scan_interval_minutes)
+            if updates:
+                params.append(root_id)
+                conn.execute(f"UPDATE scan_roots SET {', '.join(updates)} WHERE id=?", params)
         return self.get_root(root_id)
 
     def delete_root(self, root_id: int) -> None:
@@ -119,14 +210,56 @@ class Store:
             )
             conn.execute("DELETE FROM scan_roots WHERE id=?", (root_id,))
 
+    def start_root_scan(self, root_id: int) -> None:
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE scan_roots SET last_scan_status='running', last_scan_started_at=?, "
+                "last_scan_finished_at=NULL, last_scan_duration_ms=NULL WHERE id=?",
+                (utc_now(), root_id),
+            )
+
+    def finish_root_scan(self, root_id: int, status: str, duration_ms: int) -> None:
+        now = utc_now()
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE scan_roots SET last_scan_status=?, last_scan_finished_at=?, "
+                "last_scan_duration_ms=?, last_scan_at=?, last_scan_started_at=COALESCE("
+                "last_scan_started_at, ?) WHERE id=?",
+                (status, now, duration_ms, now, now, root_id),
+            )
+
     def touch_root_scanned(self, root_id: int) -> None:
         with self.db.connection() as conn:
             conn.execute("UPDATE scan_roots SET last_scan_at=? WHERE id=?", (utc_now(), root_id))
 
     @staticmethod
+    def _active_jobs(conn: Any, root_ids: list[int]) -> dict[int, dict[str, Any]]:
+        if not root_ids:
+            return {}
+        placeholders = ",".join("?" for _ in root_ids)
+        rows = conn.execute(
+            f"SELECT id, type, status, done, total, message, root_id FROM jobs "
+            f"WHERE root_id IN ({placeholders}) AND status IN ('queued','running')",
+            root_ids,
+        ).fetchall()
+        return {
+            int(row["root_id"]): {
+                "id": row["id"],
+                "type": row["type"],
+                "status": row["status"],
+                "done": row["done"],
+                "total": row["total"],
+                "message": row["message"],
+            }
+            for row in rows
+            if row["root_id"] is not None
+        }
+
+    @staticmethod
     def _root_dict(row: Any) -> dict[str, Any]:
         data = _row_dict(row)
         data["enabled"] = bool(data["enabled"])
+        data["scan_interval_minutes"] = int(data.get("scan_interval_minutes") or 0)
         return data
 
     # ------------------------------------------------------------------- sources
@@ -326,15 +459,22 @@ class Store:
         scrape_status: str | None = None,
         present: bool | None = None,
         sort: str = "updated_at",
+        complete: bool | None = None,
+        favorite: bool | None = None,
+        actress_id: int | None = None,
+        tag: str | None = None,
+        censored: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         conditions: list[str] = []
         params: list[Any] = []
         if q:
             needle = f"%{q.strip()}%"
             conditions.append(
-                "(v.filename LIKE ? OR v.path LIKE ? OR m.title LIKE ? OR v.jav_code LIKE ?)"
+                "(v.filename LIKE ? OR v.path LIKE ? OR m.title LIKE ? OR v.jav_code LIKE ? "
+                "OR EXISTS (SELECT 1 FROM video_actresses va JOIN actresses a ON a.id=va.actress_id "
+                "WHERE va.video_id=v.id AND a.name LIKE ?))"
             )
-            params.extend([needle, needle, needle, needle])
+            params.extend([needle, needle, needle, needle, needle])
         if has_code is not None:
             conditions.append("v.jav_code IS NOT NULL" if has_code else "v.jav_code IS NULL")
         if present is not None:
@@ -347,6 +487,23 @@ class Store:
             else:
                 conditions.append("m.scrape_status=?")
                 params.append(scrape_status)
+        if complete is not None:
+            conditions.append("COALESCE(m.is_complete, 0)=?")
+            params.append(1 if complete else 0)
+        if favorite is not None:
+            conditions.append("v.favorite=?")
+            params.append(1 if favorite else 0)
+        if actress_id is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM video_actresses va WHERE va.video_id=v.id AND va.actress_id=?)"
+            )
+            params.append(actress_id)
+        if tag:
+            conditions.append("EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value=?)")
+            params.append(tag)
+        if censored:
+            conditions.append("m.censored=?")
+            params.append(censored)
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         order = SORT_ORDERS.get(sort, SORT_ORDERS["updated_at"])
@@ -354,12 +511,12 @@ class Store:
 
         base_sql = """
             SELECT v.id, v.path, v.filename, v.size_bytes, v.mtime, v.duration_sec,
-                   v.screenshot, v.features, v.present, v.missing_since,
+                   v.screenshot, v.features, v.present, v.missing_since, v.favorite,
                    v.scan_status, v.created_at, v.updated_at,
                    m.video_id AS metadata_video_id, m.title, m.original_title, m.year,
                    m.code, m.cover_url, m.cover_local, m.scrape_status, m.source_name,
                    m.last_scraped_at, m.genres, m.tags, m.actresses, m.studio,
-                   m.release_date, m.runtime_sec
+                   m.release_date, m.runtime_sec, m.censored, m.country, m.is_complete
             FROM videos v
             LEFT JOIN metadata m ON m.video_id = v.id
         """
@@ -373,7 +530,13 @@ class Store:
                 base_sql + where + f" ORDER BY {order} LIMIT ? OFFSET ?",
                 [*params, page_size, offset],
             ).fetchall()
-        return [self._video_summary(row) for row in rows], total
+            actress_map = self._actress_map(conn, [int(row["id"]) for row in rows])
+        items = []
+        for row in rows:
+            summary = self._video_summary(row)
+            summary["actresses"] = actress_map.get(summary["id"], [])
+            items.append(summary)
+        return items, total
 
     def get_video(self, video_id: int) -> dict[str, Any]:
         with self.db.connection() as conn:
@@ -381,10 +544,16 @@ class Store:
             if video is None:
                 raise NotFoundError("视频不存在")
             meta = conn.execute("SELECT * FROM metadata WHERE video_id=?", (video_id,)).fetchone()
+            actress_map = self._actress_map(conn, [video_id])
         data = _row_dict(video)
         data["features"] = _json_load(data.get("features"), {})
         data["present"] = bool(data["present"])
-        return {"video": data, "metadata": _metadata_dict(meta)}
+        data["favorite"] = bool(data["favorite"])
+        return {
+            "video": data,
+            "metadata": _metadata_dict(meta),
+            "actresses": actress_map.get(video_id, []),
+        }
 
     def delete_video(self, video_id: int) -> None:
         with self.db.connection() as conn:
@@ -425,26 +594,694 @@ class Store:
                 "studio": data.pop("studio", None),
                 "release_date": data.pop("release_date", None),
                 "runtime_sec": data.pop("runtime_sec", None),
+                "censored": data.pop("censored", None),
+                "country": data.pop("country", None),
+                "is_complete": bool(data.pop("is_complete", 0)),
             }
         else:
             for key in (
                 "title", "original_title", "year", "code", "cover_url", "cover_local",
                 "scrape_status", "source_name", "last_scraped_at",
                 "genres", "tags", "actresses", "studio", "release_date", "runtime_sec",
+                "censored", "country", "is_complete",
             ):
                 data.pop(key, None)
         data["features"] = features
         data["present"] = bool(data["present"])
+        data["favorite"] = bool(data.get("favorite", 0))
         data["metadata"] = metadata
+        return data
+
+    @staticmethod
+    def _actress_map(conn: Any, video_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        if not video_ids:
+            return {}
+        placeholders = ",".join("?" for _ in video_ids)
+        rows = conn.execute(
+            f"SELECT va.video_id, a.id, a.name FROM video_actresses va "
+            f"JOIN actresses a ON a.id=va.actress_id "
+            f"WHERE va.video_id IN ({placeholders}) ORDER BY va.position ASC, a.id ASC",
+            video_ids,
+        ).fetchall()
+        result: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            result.setdefault(int(row["video_id"]), []).append(
+                {"id": int(row["id"]), "name": row["name"]}
+            )
+        return result
+
+    def _ensure_metadata_row(self, conn: Any, video_id: int) -> Any:
+        row = conn.execute("SELECT * FROM metadata WHERE video_id=?", (video_id,)).fetchone()
+        if row is not None:
+            return row
+        now = utc_now()
+        conn.execute(
+            "INSERT INTO metadata(video_id, manual_fields, scrape_status, version, "
+            "is_complete, created_at, updated_at) VALUES(?, '[]', 'pending', 1, 0, ?, ?)",
+            (video_id, now, now),
+        )
+        return conn.execute("SELECT * FROM metadata WHERE video_id=?", (video_id,)).fetchone()
+
+    @staticmethod
+    def _recompute_video_complete(conn: Any, video_id: int) -> None:
+        conn.execute(
+            """
+            UPDATE metadata SET is_complete = CASE WHEN
+                COALESCE(TRIM(title), '') <> ''
+                AND COALESCE(TRIM(release_date), '') <> ''
+                AND COALESCE(cover_local, '') <> ''
+                AND (COALESCE(runtime_sec, 0) > 0 OR COALESCE(
+                    (SELECT duration_sec FROM videos WHERE id=metadata.video_id), 0) > 0)
+                AND COALESCE(json_array_length(tags), 0) > 0
+                AND (SELECT COUNT(*) FROM video_actresses WHERE video_id=metadata.video_id) > 0
+            THEN 1 ELSE 0 END
+            WHERE video_id=?
+            """,
+            (video_id,),
+        )
+
+    @staticmethod
+    def _recompute_actress_complete(conn: Any, actress_id: int) -> None:
+        conn.execute(
+            """
+            UPDATE actresses SET is_complete = CASE WHEN
+                COALESCE(TRIM(name), '') <> ''
+                AND COALESCE(TRIM(birth_date), '') <> ''
+                AND COALESCE(TRIM(nationality), '') <> ''
+                AND COALESCE(TRIM(cover_local), '') <> ''
+            THEN 1 ELSE 0 END
+            WHERE id=?
+            """,
+            (actress_id,),
+        )
+
+    def _get_or_create_actress(
+        self, conn: Any, name: str, profile_url: str | None = None
+    ) -> int:
+        key = actress_name_key(name)
+        if not key:
+            raise InvalidError("演员姓名不能为空")
+        row = conn.execute("SELECT id FROM actresses WHERE name_key=?", (key,)).fetchone()
+        if row is not None:
+            if profile_url:
+                conn.execute(
+                    "UPDATE actresses SET profile_url=COALESCE(profile_url, ?), updated_at=? "
+                    "WHERE id=?",
+                    (profile_url, utc_now(), row["id"]),
+                )
+            return int(row["id"])
+        now = utc_now()
+        cur = conn.execute(
+            "INSERT INTO actresses(name, name_key, aliases, profile_url, manual_fields, "
+            "created_at, updated_at) VALUES(?, ?, '[]', ?, '[]', ?, ?)",
+            (name.strip(), key, profile_url, now, now),
+        )
+        actress_id = int(cur.lastrowid)
+        self._recompute_actress_complete(conn, actress_id)
+        return actress_id
+
+    def _replace_video_actresses(
+        self, conn: Any, video_id: int, refs: list[dict[str, Any]]
+    ) -> None:
+        conn.execute("DELETE FROM video_actresses WHERE video_id=?", (video_id,))
+        seen: set[int] = set()
+        position = 0
+        for ref in refs:
+            actress_id = ref.get("id")
+            name = ref.get("name")
+            profile_url = ref.get("url") or ref.get("profile_url")
+            if actress_id is None:
+                if not isinstance(name, str) or not name.strip():
+                    raise InvalidError("演员必须提供 id 或 name")
+                actress_id = self._get_or_create_actress(conn, name, profile_url)
+            else:
+                row = conn.execute(
+                    "SELECT id FROM actresses WHERE id=?", (int(actress_id),)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"演员不存在: {actress_id}")
+                actress_id = int(actress_id)
+                if profile_url:
+                    conn.execute(
+                        "UPDATE actresses SET profile_url=COALESCE(profile_url, ?), "
+                        "updated_at=? WHERE id=?",
+                        (str(profile_url), utc_now(), actress_id),
+                    )
+            if actress_id in seen:
+                continue
+            seen.add(actress_id)
+            conn.execute(
+                "INSERT INTO video_actresses(video_id, actress_id, position) VALUES(?, ?, ?)",
+                (video_id, actress_id, position),
+            )
+            position += 1
+        self._recompute_video_complete(conn, video_id)
+
+    def update_video_metadata(
+        self, video_id: int, fields: dict[str, Any], version: int
+    ) -> dict[str, Any]:
+        allowed = {
+            "title", "original_title", "overview", "release_date", "year", "runtime_sec",
+            "genres", "tags", "code", "studio", "series", "director", "censored",
+            "country", "actresses",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise InvalidError(f"未知字段: {', '.join(sorted(unknown))}")
+        with self.db.transaction() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            existing = conn.execute(
+                "SELECT * FROM metadata WHERE video_id=?", (video_id,)
+            ).fetchone()
+            if existing is not None and int(existing["version"]) != int(version):
+                raise ConflictError(
+                    "元数据已被修改，请刷新后重试", code="version_conflict"
+                )
+            self._ensure_metadata_row(conn, video_id)
+
+            updates: dict[str, Any] = {}
+            manual: list[str] = []
+            for key, value in fields.items():
+                if key == "actresses":
+                    continue
+                if key in {"genres", "tags"}:
+                    if value is not None:
+                        if not isinstance(value, list) or not all(
+                            isinstance(item, str) for item in value
+                        ):
+                            raise InvalidError(f"{key} 必须是字符串数组")
+                        value = json.dumps(value, ensure_ascii=False)
+                elif key in {"year", "runtime_sec"}:
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    ):
+                        raise InvalidError(f"{key} 必须是非负整数")
+                elif key == "censored":
+                    if value not in {None, "censored", "uncensored", "unknown"}:
+                        raise InvalidError("censored 必须是 censored/uncensored/unknown")
+                else:
+                    if value is not None:
+                        if not isinstance(value, str):
+                            raise InvalidError(f"{key} 必须是字符串")
+                        value = value.strip() or None
+                updates[key] = value
+                manual.append(key)
+            if updates:
+                assignments = ", ".join(f"{key}=?" for key in updates)
+                conn.execute(
+                    f"UPDATE metadata SET {assignments}, version=version+1, updated_at=? "
+                    f"WHERE video_id=?",
+                    [*updates.values(), utc_now(), video_id],
+                )
+            if "actresses" in fields:
+                refs = fields["actresses"] or []
+                if not isinstance(refs, list):
+                    raise InvalidError("actresses 必须是数组")
+                self._replace_video_actresses(conn, video_id, refs)
+                manual.append("actresses")
+            if manual:
+                row = conn.execute(
+                    "SELECT manual_fields FROM metadata WHERE video_id=?", (video_id,)
+                ).fetchone()
+                current = _json_load(row["manual_fields"], [])
+                for key in manual:
+                    if key not in current:
+                        current.append(key)
+                conn.execute(
+                    "UPDATE metadata SET manual_fields=?, version=version+1, updated_at=? "
+                    "WHERE video_id=?",
+                    (json.dumps(current, ensure_ascii=False), utc_now(), video_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE metadata SET version=version+1, updated_at=? WHERE video_id=?",
+                    (utc_now(), video_id),
+                )
+            self._recompute_video_complete(conn, video_id)
+        return self.get_video(video_id)
+
+    def set_video_favorite(self, video_id: int, favorite: bool) -> dict[str, Any]:
+        with self.db.connection() as conn:
+            cur = conn.execute(
+                "UPDATE videos SET favorite=?, updated_at=? WHERE id=?",
+                (int(favorite), utc_now(), video_id),
+            )
+        if cur.rowcount == 0:
+            raise NotFoundError("视频不存在")
+        return self.get_video(video_id)
+
+    def update_video_cover(
+        self, video_id: int, cover_local: str, cover_url: str | None = None
+    ) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            self._ensure_metadata_row(conn, video_id)
+            if cover_url is None:
+                conn.execute(
+                    "UPDATE metadata SET cover_local=?, version=version+1, updated_at=? "
+                    "WHERE video_id=?",
+                    (cover_local, utc_now(), video_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE metadata SET cover_local=?, cover_url=?, version=version+1, "
+                    "updated_at=? WHERE video_id=?",
+                    (cover_local, cover_url, utc_now(), video_id),
+                )
+            row = conn.execute(
+                "SELECT manual_fields FROM metadata WHERE video_id=?", (video_id,)
+            ).fetchone()
+            current = _json_load(row["manual_fields"], [])
+            if "cover_local" not in current:
+                current.append("cover_local")
+            conn.execute(
+                "UPDATE metadata SET manual_fields=? WHERE video_id=?",
+                (json.dumps(current, ensure_ascii=False), video_id),
+            )
+            self._recompute_video_complete(conn, video_id)
+        return self.get_video(video_id)
+
+    def merge_video_result(
+        self,
+        video_id: int,
+        fields: dict[str, Any],
+        *,
+        source_name: str,
+        matched_by: str,
+        actresses: list[str | dict[str, Any]] | None = None,
+        raw_payload: str | None = None,
+        overwrite_manual: bool = False,
+    ) -> dict[str, Any]:
+        allowed = {
+            "title", "original_title", "overview", "release_date", "year", "runtime_sec",
+            "genres", "tags", "code", "studio", "series", "director", "censored",
+            "country", "cover_url", "cover_local",
+        }
+        with self.db.transaction() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            meta = self._ensure_metadata_row(conn, video_id)
+            manual = set(_json_load(meta["manual_fields"], []))
+            updates: dict[str, Any] = {}
+            for key, value in fields.items():
+                if key not in allowed or value is None:
+                    continue
+                if key in manual and not overwrite_manual:
+                    continue
+                if key in {"genres", "tags"}:
+                    if isinstance(value, list):
+                        value = json.dumps(value, ensure_ascii=False)
+                updates[key] = value
+            assignments = ", ".join(f"{key}=?" for key in updates)
+            now = utc_now()
+            if assignments:
+                conn.execute(
+                    f"UPDATE metadata SET {assignments}, source_name=?, matched_by=?, "
+                    "raw_payload=?, scrape_status='success', last_scraped_at=?, "
+                    "version=version+1, updated_at=? WHERE video_id=?",
+                    [
+                        *updates.values(),
+                        source_name,
+                        matched_by,
+                        raw_payload,
+                        now,
+                        now,
+                        video_id,
+                    ],
+                )
+            else:
+                conn.execute(
+                    "UPDATE metadata SET source_name=?, matched_by=?, raw_payload=?, "
+                    "scrape_status='success', last_scraped_at=?, version=version+1, "
+                    "updated_at=? WHERE video_id=?",
+                    (source_name, matched_by, raw_payload, now, now, video_id),
+                )
+            if actresses and "actresses" not in manual:
+                refs: list[dict[str, Any]] = []
+                for item in actresses:
+                    if isinstance(item, str):
+                        refs.append({"name": item})
+                    elif isinstance(item, dict):
+                        refs.append(item)
+                self._replace_video_actresses(conn, video_id, refs)
+            self._recompute_video_complete(conn, video_id)
+        return self.get_video(video_id)
+
+    def mark_video_scrape_status(self, video_id: int, status: str) -> None:
+        with self.db.transaction() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            self._ensure_metadata_row(conn, video_id)
+            conn.execute(
+                "UPDATE metadata SET scrape_status=?, last_scraped_at=?, updated_at=? "
+                "WHERE video_id=?",
+                (status, utc_now(), utc_now(), video_id),
+            )
+
+    def merge_actress_result(
+        self,
+        actress_id: int,
+        fields: dict[str, Any],
+        *,
+        source_name: str,
+        raw_payload: str | None = None,
+        overwrite_manual: bool = False,
+    ) -> dict[str, Any]:
+        allowed = {
+            "aliases", "birth_date", "nationality", "cover_url", "cover_local",
+            "profile_url", "height_cm", "bust_cm", "waist_cm", "hips_cm", "cup",
+        }
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT * FROM actresses WHERE id=?", (actress_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("演员不存在")
+            manual = set(_json_load(row["manual_fields"], []))
+            updates: dict[str, Any] = {}
+            for key, value in fields.items():
+                if key not in allowed or value is None:
+                    continue
+                if key in manual and not overwrite_manual:
+                    continue
+                if key == "aliases" and isinstance(value, list):
+                    value = json.dumps(value, ensure_ascii=False)
+                updates[key] = value
+            assignments = ", ".join(f"{key}=?" for key in updates)
+            now = utc_now()
+            if assignments:
+                conn.execute(
+                    f"UPDATE actresses SET {assignments}, source_name=?, raw_payload=?, "
+                    "version=version+1, updated_at=? WHERE id=?",
+                    [*updates.values(), source_name, raw_payload, now, actress_id],
+                )
+            else:
+                conn.execute(
+                    "UPDATE actresses SET source_name=?, raw_payload=?, "
+                    "version=version+1, updated_at=? WHERE id=?",
+                    (source_name, raw_payload, now, actress_id),
+                )
+            self._recompute_actress_complete(conn, actress_id)
+        return self.get_actress(actress_id)
+
+    def list_video_ids_for_scrape(self, root_id: int, *, force: bool = False) -> list[int]:
+        sql = """
+            SELECT v.id FROM videos v
+            LEFT JOIN metadata m ON m.video_id=v.id
+            WHERE v.present=1 AND v.root_id=?
+        """
+        params: list[Any] = [root_id]
+        if not force:
+            sql += " AND COALESCE(m.is_complete, 0)=0"
+        sql += " ORDER BY v.id ASC"
+        with self.db.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def log_scrape(
+        self,
+        video_id: int,
+        job_id: str | None,
+        source_name: str,
+        feature_used: str,
+        success: bool,
+        message: str,
+    ) -> None:
+        with self.db.connection() as conn:
+            conn.execute(
+                "INSERT INTO scrape_logs(video_id, job_id, source_name, feature_used, "
+                "success, message, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (video_id, job_id, source_name, feature_used, int(success), message, utc_now()),
+            )
+
+    def list_scrape_logs(
+        self, limit: int = 100, video_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        with self.db.connection() as conn:
+            if video_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM scrape_logs ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM scrape_logs WHERE video_id=? ORDER BY id DESC LIMIT ?",
+                    (video_id, limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ actresses
+
+    def list_actresses(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        q: str | None = None,
+        complete: bool | None = None,
+        favorite: bool | None = None,
+        sort: str = "video_count",
+    ) -> tuple[list[dict[str, Any]], int]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if q:
+            needle = f"%{q.strip()}%"
+            conditions.append("(a.name LIKE ? OR a.aliases LIKE ?)")
+            params.extend([needle, needle])
+        if complete is not None:
+            conditions.append("a.is_complete=?")
+            params.append(1 if complete else 0)
+        if favorite is not None:
+            conditions.append("a.favorite=?")
+            params.append(1 if favorite else 0)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        order = {
+            "video_count": "video_count DESC, a.name COLLATE NOCASE ASC",
+            "name": "a.name COLLATE NOCASE ASC",
+            "updated_at": "a.updated_at DESC",
+            "birth_date": "a.birth_date DESC NULLS LAST",
+        }.get(sort, "video_count DESC, a.name COLLATE NOCASE ASC")
+        offset = (page - 1) * page_size
+        base_sql = """
+            SELECT a.*,
+                   (SELECT COUNT(*) FROM video_actresses va
+                    JOIN videos v ON v.id=va.video_id
+                    WHERE va.actress_id=a.id AND v.present=1) AS video_count
+            FROM actresses a
+        """
+        count_sql = "SELECT COUNT(*) AS n FROM actresses a"
+        with self.db.connection() as conn:
+            total = int(conn.execute(count_sql + where, params).fetchone()["n"])
+            rows = conn.execute(
+                base_sql + where + f" ORDER BY {order} LIMIT ? OFFSET ?",
+                [*params, page_size, offset],
+            ).fetchall()
+        return [self._actress_dict(row) for row in rows], total
+
+    def get_actress(self, actress_id: int) -> dict[str, Any]:
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT * FROM actresses WHERE id=?", (actress_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("演员不存在")
+            count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM video_actresses va JOIN videos v "
+                    "ON v.id=va.video_id WHERE va.actress_id=? AND v.present=1",
+                    (actress_id,),
+                ).fetchone()["n"]
+            )
+            videos = conn.execute(
+                """
+                SELECT v.id, v.filename, v.path, v.present, v.favorite, v.updated_at,
+                       m.title, m.year, m.release_date, m.cover_local, m.is_complete
+                FROM video_actresses va
+                JOIN videos v ON v.id=va.video_id
+                LEFT JOIN metadata m ON m.video_id=v.id
+                WHERE va.actress_id=?
+                ORDER BY v.updated_at DESC
+                """,
+                (actress_id,),
+            ).fetchall()
+        actress = self._actress_dict(row)
+        actress["video_count"] = count
+        return {"actress": actress, "videos": [_row_dict(video) for video in videos]}
+
+    def create_actress(self, name: str) -> dict[str, Any]:
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidError("演员姓名不能为空")
+        key = actress_name_key(name)
+        now = utc_now()
+        with self.db.transaction() as conn:
+            if conn.execute("SELECT 1 FROM actresses WHERE name_key=?", (key,)).fetchone():
+                raise ConflictError(f"演员已存在: {name.strip()}")
+            cur = conn.execute(
+                "INSERT INTO actresses(name, name_key, aliases, manual_fields, "
+                "created_at, updated_at) VALUES(?, ?, '[]', '[]', ?, ?)",
+                (name.strip(), key, now, now),
+            )
+            actress_id = int(cur.lastrowid)
+            self._recompute_actress_complete(conn, actress_id)
+        return self.get_actress(actress_id)
+
+    def update_actress(
+        self, actress_id: int, fields: dict[str, Any], version: int
+    ) -> dict[str, Any]:
+        allowed = {
+            "name", "aliases", "birth_date", "nationality", "height_cm", "bust_cm",
+            "waist_cm", "hips_cm", "cup", "profile_url",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise InvalidError(f"未知字段: {', '.join(sorted(unknown))}")
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT * FROM actresses WHERE id=?", (actress_id,)
+            ).fetchone()
+            if existing is None:
+                raise NotFoundError("演员不存在")
+            if int(existing["version"]) != int(version):
+                raise ConflictError(
+                    "演员资料已被修改，请刷新后重试", code="version_conflict"
+                )
+            updates: dict[str, Any] = {}
+            manual: list[str] = []
+            for key, value in fields.items():
+                if key == "name":
+                    if not isinstance(value, str) or not value.strip():
+                        raise InvalidError("演员姓名不能为空")
+                    value = value.strip()
+                    new_key = actress_name_key(value)
+                    duplicate = conn.execute(
+                        "SELECT 1 FROM actresses WHERE name_key=? AND id<>?",
+                        (new_key, actress_id),
+                    ).fetchone()
+                    if duplicate:
+                        raise ConflictError(f"演员已存在: {value}")
+                    updates["name_key"] = new_key
+                elif key == "aliases":
+                    if value is not None:
+                        if not isinstance(value, list) or not all(
+                            isinstance(item, str) for item in value
+                        ):
+                            raise InvalidError("aliases 必须是字符串数组")
+                        value = json.dumps(value, ensure_ascii=False)
+                elif key in {"height_cm", "bust_cm", "waist_cm", "hips_cm"}:
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    ):
+                        raise InvalidError(f"{key} 必须是非负整数")
+                else:
+                    if value is not None:
+                        if not isinstance(value, str):
+                            raise InvalidError(f"{key} 必须是字符串")
+                        value = value.strip() or None
+                updates[key] = value
+                manual.append(key)
+            if updates:
+                assignments = ", ".join(f"{key}=?" for key in updates)
+                conn.execute(
+                    f"UPDATE actresses SET {assignments}, version=version+1, updated_at=? "
+                    f"WHERE id=?",
+                    [*updates.values(), utc_now(), actress_id],
+                )
+            row = conn.execute(
+                "SELECT manual_fields FROM actresses WHERE id=?", (actress_id,)
+            ).fetchone()
+            current = _json_load(row["manual_fields"], [])
+            for key in manual:
+                if key not in current:
+                    current.append(key)
+            conn.execute(
+                "UPDATE actresses SET manual_fields=?, version=version+1, updated_at=? "
+                "WHERE id=?",
+                (json.dumps(current, ensure_ascii=False), utc_now(), actress_id),
+            )
+            self._recompute_actress_complete(conn, actress_id)
+        return self.get_actress(actress_id)
+
+    def delete_actress(self, actress_id: int) -> None:
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT id FROM actresses WHERE id=?", (actress_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("演员不存在")
+            linked = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM video_actresses WHERE actress_id=?",
+                    (actress_id,),
+                ).fetchone()["n"]
+            )
+            if linked:
+                raise ConflictError("该演员仍有关联视频，无法删除")
+            conn.execute("DELETE FROM actresses WHERE id=?", (actress_id,))
+
+    def set_actress_favorite(self, actress_id: int, favorite: bool) -> dict[str, Any]:
+        with self.db.connection() as conn:
+            cur = conn.execute(
+                "UPDATE actresses SET favorite=?, updated_at=? WHERE id=?",
+                (int(favorite), utc_now(), actress_id),
+            )
+        if cur.rowcount == 0:
+            raise NotFoundError("演员不存在")
+        return self.get_actress(actress_id)
+
+    def update_actress_cover(
+        self, actress_id: int, cover_local: str, cover_url: str | None = None
+    ) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT id FROM actresses WHERE id=?", (actress_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("演员不存在")
+            if cover_url is None:
+                conn.execute(
+                    "UPDATE actresses SET cover_local=?, version=version+1, updated_at=? "
+                    "WHERE id=?",
+                    (cover_local, utc_now(), actress_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE actresses SET cover_local=?, cover_url=?, version=version+1, "
+                    "updated_at=? WHERE id=?",
+                    (cover_local, cover_url, utc_now(), actress_id),
+                )
+            row = conn.execute(
+                "SELECT manual_fields FROM actresses WHERE id=?", (actress_id,)
+            ).fetchone()
+            current = _json_load(row["manual_fields"], [])
+            if "cover_local" not in current:
+                current.append("cover_local")
+            conn.execute(
+                "UPDATE actresses SET manual_fields=? WHERE id=?",
+                (json.dumps(current, ensure_ascii=False), actress_id),
+            )
+            self._recompute_actress_complete(conn, actress_id)
+        return self.get_actress(actress_id)
+
+    @staticmethod
+    def _actress_dict(row: Any) -> dict[str, Any]:
+        data = _row_dict(row)
+        data["aliases"] = _json_load(data.get("aliases"), [])
+        data["manual_fields"] = _json_load(data.get("manual_fields"), [])
+        data["favorite"] = bool(data["favorite"])
+        data["is_complete"] = bool(data["is_complete"])
         return data
 
     # ---------------------------------------------------------------------- jobs
 
-    def create_job(self, job_id: str, job_type: str, payload: dict[str, Any]) -> None:
+    def create_job(
+        self,
+        job_id: str,
+        job_type: str,
+        payload: dict[str, Any],
+        root_id: int | None = None,
+    ) -> None:
         with self.db.connection() as conn:
             conn.execute(
-                "INSERT INTO jobs(id, type, status, payload, created_at) VALUES(?, ?, 'queued', ?, ?)",
-                (job_id, job_type, json.dumps(payload, ensure_ascii=False), utc_now()),
+                "INSERT INTO jobs(id, type, status, payload, root_id, created_at) "
+                "VALUES(?, ?, 'queued', ?, ?, ?)",
+                (job_id, job_type, json.dumps(payload, ensure_ascii=False), root_id, utc_now()),
             )
 
     def update_job(self, job_id: str, **fields: Any) -> None:
@@ -469,11 +1306,17 @@ class Store:
         data["cancel_requested"] = bool(data["cancel_requested"])
         return data
 
-    def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_jobs(self, limit: int = 20, root_id: int | None = None) -> list[dict[str, Any]]:
         with self.db.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if root_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM jobs WHERE root_id=? ORDER BY created_at DESC LIMIT ?",
+                    (root_id, limit),
+                ).fetchall()
         result = []
         for row in rows:
             data = _row_dict(row)
@@ -516,7 +1359,13 @@ def _metadata_dict(row: Any) -> dict[str, Any] | None:
     data["tags"] = _json_load(data.get("tags"), [])
     data["actresses"] = _json_load(data.get("actresses"), [])
     data["manual_fields"] = _json_load(data.get("manual_fields"), [])
+    data["is_complete"] = bool(data.get("is_complete", 0))
     return data
+
+
+def _validate_interval(value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10080:
+        raise InvalidError("自动扫描间隔必须是 0-10080 的整数（分钟）")
 
 
 def _validate_settings_patch(patch: Any) -> None:

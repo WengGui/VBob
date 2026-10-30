@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 from .errors import InvalidError
 
-SOURCE_TYPES = {"feature", "query"}
+SOURCE_TYPES = {"feature", "query", "actress"}
 EXTRACT_PREFIXES = {"css", "xpath", "json", "regex"}
 
 
@@ -28,7 +28,7 @@ def validate_source_config(config: Any) -> dict[str, Any]:
 
     source_type = data.get("type")
     if source_type not in SOURCE_TYPES:
-        raise InvalidError("type 必须是 feature 或 query")
+        raise InvalidError("type 必须是 feature、query 或 actress")
     if source_type == "feature":
         data["feature"] = _non_empty_str(data.get("feature"), "feature")
 
@@ -46,9 +46,10 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise InvalidError("request 必须是对象")
     url = _non_empty_str(request.get("url"), "request.url")
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise InvalidError("request.url 必须是 http(s) URL")
+    if url != "{actress_url}":
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise InvalidError("request.url 必须是 http(s) URL")
     request["url"] = url
     method = str(request.get("method", "GET")).upper()
     if method not in {"GET", "POST"}:
@@ -61,6 +62,25 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     for field, expression in extract.items():
         if not isinstance(field, str) or not field.strip():
             raise InvalidError("extract 的字段名必须是非空字符串")
+        if isinstance(expression, dict):
+            if field != "actresses":
+                raise InvalidError(f"extract.{field} 必须是非空字符串")
+            unknown = set(expression) - {"selector", "name", "url"}
+            if unknown:
+                raise InvalidError(f"extract.actresses 含有未知字段: {', '.join(sorted(unknown))}")
+            selector = expression.get("selector")
+            if not isinstance(selector, str) or not selector.strip():
+                raise InvalidError("extract.actresses.selector 必须是非空字符串")
+            prefix = selector.strip().split(":", 1)[0].strip().lower()
+            if prefix not in EXTRACT_PREFIXES:
+                raise InvalidError(
+                    "extract.actresses.selector 需要以 css: / xpath: / json: / regex: 开头"
+                )
+            for key in ("name", "url"):
+                value = expression.get(key)
+                if value is not None and not isinstance(value, str):
+                    raise InvalidError(f"extract.actresses.{key} 必须是字符串")
+            continue
         if not isinstance(expression, str) or not expression.strip():
             raise InvalidError(f"extract.{field} 必须是非空字符串")
         prefix = expression.strip().split(":", 1)[0].strip().lower()
@@ -73,5 +93,15 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     if not isinstance(validators, list) or not all(isinstance(item, dict) for item in validators):
         raise InvalidError("validators 必须是对象数组")
     data["validators"] = validators
+
+    defaults = data.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise InvalidError("defaults 必须是对象")
+    for key, value in defaults.items():
+        if not isinstance(key, str) or not key.strip():
+            raise InvalidError("defaults 的字段名必须是非空字符串")
+        if not isinstance(value, (str, int, float, list)):
+            raise InvalidError(f"defaults.{key} 必须是字符串、数字或数组")
+    data["defaults"] = defaults
 
     return data

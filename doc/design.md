@@ -1,6 +1,6 @@
 # 本地视频管理刮削系统 — 设计文档
 
-> 版本 v0.4（2026-10-29，根据设计评审修订；变更摘要见第 13 节）
+> 版本 v0.5（2026-10-29，新增演员体系、完整度、收藏与设置重构；变更摘要见第 13 节，增量需求见第 14 节）
 
 ## 1. 项目概述
 
@@ -17,13 +17,15 @@
 3. **所有刮削源均可配置**，内置源与用户自定义源走同一接口。
 4. **按特征路由，失败可降级**：番号源失败自动降级到通用源，用户无感知。
 5. **播放由后端直接调起本地播放器**：前端只传 `video_id`，不接触文件路径，也不直连本地端口。
+6. **以完整度衡量刮削质量**：必填字段缺失不会让刮削失败，而是标记为不完整并允许手动补齐。
+7. **演员是一等实体**：演员拥有独立资料、海报墙、收藏和刮削源；视频与演员是多对多关系。
 
 ### 1.3 非目标
 
 - 不做视频转码、不做流媒体推流。
 - 不做多用户权限体系（单用户本地工具）。
 - 不做 Docker/远程/多设备部署，只支持单机本地运行。
-- 第一版不做磁力下载、不做女优/厂商聚合浏览页。
+- 不做磁力下载；不做厂商聚合浏览页（演员页与收藏已纳入 v0.5）。
 
 ---
 
@@ -717,3 +719,235 @@ POST /api/videos/{id}/play
 10. **工程与安全**：SQLite 短连接 + 迁移/日志/备份；默认本地绑定、SSRF 提示；源测试 CLI 进入 MVP。
 11. **v0.3 范围收敛**：取消 Docker/NAS 部署与播放助手组件，删除远程播放协议、配对、路径映射及相关风险条目；架构简化为单机单进程，播放由后端直接调起本地播放器。
 12. **v0.4 技术栈调整**：后端由 Go 改为 Python 3.12+ / FastAPI，SQLite 使用标准库 `sqlite3`；提取器接口、选择器实现建议、工程约束与分发方式同步更新。
+
+---
+
+## 14. v0.5 增量需求：演员体系、完整度、收藏与设置重构
+
+> 2026-10-29 需求评审确认。本节覆盖第 3、6、7、8、9 节中与本节冲突的描述；实现以本节为准。
+
+### 14.1 完整度与"缺失"语义
+
+**视频必填字段**（用于完整度判断，不作为刮削失败条件）：
+
+1. 影视名称 `title`
+2. 发行日期 `release_date`
+3. 演员表：至少关联 1 位演员
+4. 标签：至少 1 个
+5. 封面：本地封面文件存在（`cover_local`）
+6. 时长：`metadata.runtime_sec` 或 `videos.duration_sec` 大于 0
+
+可选字段：番号 `code`、系列 `series`、是否有码 `censored`、国家/地区 `country`、厂商、导演、简介。
+
+**演员必填字段**：
+
+1. 姓名 `name`
+2. 出生日期 `birth_date`
+3. 国籍 `nationality`
+4. 封面：本地封面文件存在（`cover_local`）
+
+可选：身高、三围、罩杯、别名。
+
+规则：
+
+- `metadata.is_complete` / `actresses.is_complete` 在刮削、手动编辑、封面更新、演员关联变化后重新计算。
+- `scrape_status` 只表示"是否有源匹配/抓取过程是否成功"，与完整度分开：抓取成功但缺字段 → `success` + 不完整；没有源匹配 → `no_match`；网络/解析错误 → `failed`。
+- **缺字段绝不导致刮削失败**；只影响完整度、筛选和统计。
+- 目录管理中的"已刮削"= 该目录下 `metadata.is_complete=1` 的视频数。
+- **不专门管理缺失文件**：扫描未发现的记录仅标记 `present=0`，默认不出现在列表中；不提供缺失筛选、清理入口或相关菜单。刮削失败/不完整仍可单独筛选。
+- 视频完整度不要求其关联演员的资料完整；演员完整度独立计算。
+
+### 14.2 数据模型增量
+
+```sql
+-- 视频收藏
+ALTER TABLE videos ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+
+-- 视频元数据扩展
+ALTER TABLE metadata ADD COLUMN censored TEXT;       -- censored | uncensored | unknown
+ALTER TABLE metadata ADD COLUMN country TEXT;        -- 自由文本
+ALTER TABLE metadata ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 0;
+-- metadata.actresses 保留为兼容字段，不再作为演员数据源
+
+-- 演员
+CREATE TABLE actresses (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    name_key      TEXT NOT NULL UNIQUE,          -- NFKC + casefold + 空白归一
+    aliases       TEXT NOT NULL DEFAULT '[]',    -- JSON array
+    birth_date    TEXT,
+    nationality   TEXT,
+    cover_url     TEXT,
+    cover_local   TEXT,
+    profile_url   TEXT,                          -- 来源演员页
+    height_cm     INTEGER,
+    bust_cm       INTEGER,
+    waist_cm      INTEGER,
+    hips_cm       INTEGER,
+    cup           TEXT,
+    favorite      INTEGER NOT NULL DEFAULT 0,
+    is_complete   INTEGER NOT NULL DEFAULT 0,
+    source_name   TEXT,
+    raw_payload   TEXT,
+    manual_fields TEXT NOT NULL DEFAULT '[]',
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- 视频-演员关联
+CREATE TABLE video_actresses (
+    video_id   INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    actress_id INTEGER NOT NULL REFERENCES actresses(id) ON DELETE CASCADE,
+    position   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (video_id, actress_id)
+);
+
+-- 扫描目录：自动扫描与统计
+ALTER TABLE scan_roots ADD COLUMN scan_interval_minutes INTEGER NOT NULL DEFAULT 0; -- 0=关闭
+ALTER TABLE scan_roots ADD COLUMN last_scan_started_at TEXT;
+ALTER TABLE scan_roots ADD COLUMN last_scan_finished_at TEXT;
+ALTER TABLE scan_roots ADD COLUMN last_scan_status TEXT;       -- idle/running/succeeded/failed/canceled
+ALTER TABLE scan_roots ADD COLUMN last_scan_duration_ms INTEGER;
+
+-- 任务归属目录，便于按目录展示扫描/刮削进度
+ALTER TABLE jobs ADD COLUMN root_id INTEGER REFERENCES scan_roots(id) ON DELETE SET NULL;
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_actresses_name_key     ON actresses(name_key);
+CREATE INDEX idx_actresses_favorite     ON actresses(favorite);
+CREATE INDEX idx_actresses_complete     ON actresses(is_complete);
+CREATE INDEX idx_video_actresses_actress ON video_actresses(actress_id);
+CREATE INDEX idx_metadata_complete      ON metadata(is_complete);
+CREATE INDEX idx_videos_favorite        ON videos(favorite);
+CREATE INDEX idx_jobs_root              ON jobs(root_id);
+```
+
+补充规则：
+
+- 演员按 `name_key` 去重；不同写法的别名存入 `aliases`。具体合并/别名管理 UI 留到后续版本，但字段先保留。
+- 删除演员：存在关联视频时返回 `409`，必须先解除关联；删除视频会级联删除关联，演员保留，之后可删除。
+- 收藏为单用户布尔字段，视频与演员各一个。
+- 封面文件路径：`data/covers/videos/{id}.jpg`、`data/covers/actresses/{id}.jpg`，数据库只存相对路径。
+
+### 14.3 演员刮削源与多源合并
+
+源类型扩展为 `feature | query | actress`。
+
+**视频源**额外支持结构化演员提取：
+
+```yaml
+extract:
+  actresses:
+    selector: "css: .star-name a"
+    name: "@text"
+    url: "@href"        # 可选，演员详情页地址
+```
+
+**演员源**（`type: actress`）：
+
+- 占位符：`{actress_name}`、`{actress_url}`。
+- 提取字段：`name`、`birth_date`、`nationality`、`cover_url`、`height_cm`、`bust_cm`、`waist_cm`、`hips_cm`、`cup`、`aliases`。
+- 演员源只负责补全演员资料，不影响视频刮削结果。
+
+调度规则：
+
+- 视频刮削从"第一个有效源直接返回"改为**按优先级逐源合并**：手动字段优先，其余字段按源优先级取第一个非空值，直到必填字段齐全或源耗尽；保存部分结果并计算完整度。
+- 演员在视频刮削时按 `name_key` 自动创建（至少写入姓名）；若视频源提供演员详情页 URL，则记录 `profile_url`。
+- 视频刮削完成后，对资料不完整的演员按优先级运行演员源；失败不影响视频完整度。
+- 批量刮削按目录触发：默认只处理不完整视频，支持"强制重刮"和"覆盖手动编辑"。
+- 源测试接口需同时支持视频源与演员源。
+
+### 14.4 扫描与目录管理
+
+- `scan_roots.scan_interval_minutes`：自动扫描间隔，0 表示关闭（默认）。后台调度器每 60 秒检查一次；若该目录没有进行中的任务且距上次扫描超过间隔，则创建扫描任务。
+- **编辑目录地址**：`PATCH /api/scan-roots/{id}` 可修改 `path`。修改时在同一事务内：
+  1. 校验新目录存在且不与其它目录重叠；
+  2. 对该目录下已有视频按"旧根目录 → 相对路径 → 新根目录"重写 `path`/`path_key`；
+  3. 路径冲突时拒绝修改；
+  4. 元数据、收藏、视频 ID 全部保留；文件实际不在新位置时，下次扫描标记为缺失。
+  这样可解决"文件夹改名后扫描不到、元数据重新入库"的问题。
+- 目录行操作（对应参考图）：
+  - 手动扫描
+  - 批量刮削
+  - 扫描设置（自动扫描间隔）
+  - 编辑（修改目录地址）
+  - 删除
+  - 取消"工具"按钮
+- 目录行展示：
+  - 已扫描数量 = 该目录视频总数
+  - 已刮削数量 = `is_complete=1` 的视频数
+  - 当前状态 = 空闲 / 扫描中 / 刮削中（按该目录的活动任务）
+  - 上次扫描开始/结束时间与耗时
+- 扫描与批量刮削任务按目录拆分（`jobs.root_id`），"扫描全部"为每个启用目录创建任务，进度直接显示在目录行。
+
+### 14.5 手动编辑与封面
+
+- `PATCH /api/videos/{id}/metadata`：可修改全部视频字段，包括标题、发行日期、标签数组、演员列表（ID 或姓名，姓名不存在时自动创建）、番号、系列、有码状态、国家/地区、时长、简介等。
+- `PATCH /api/actresses/{id}`：可修改演员全部字段。
+- 字段级 `manual_fields`：手动字段不被自动刮削覆盖；强制重刮时可选择覆盖。
+- 封面：
+  - 支持上传本地文件（multipart）或提供图片 URL（后端下载）；
+  - 后端校验格式（jpeg/png/webp）与大小（默认 ≤10MB），保存到本地并写入 `cover_local`；
+  - 视频与演员分别提供上传/URL 设置接口；
+  - 刮削得到的封面 URL 也由后端自动下载缓存；下载失败时保留 `cover_url`，但不算"本地封面"，完整度不满足。
+- 所有写操作继续使用 `metadata.version` / `actresses.version` 乐观锁。
+
+### 14.6 API 增量
+
+```text
+GET    /api/videos?complete=&favorite=&actress_id=&tag=&censored=&sort=
+PATCH  /api/videos/{id}/metadata       手动编辑全部字段 {fields, version}
+PATCH  /api/videos/{id}/favorite       {favorite}
+POST   /api/videos/{id}/cover          上传本地封面（multipart）
+PUT    /api/videos/{id}/cover          {url} 下载图床/源站封面
+
+GET    /api/actresses                  列表（搜索、完整度、收藏、视频数排序）
+POST   /api/actresses                  新建演员 {name}
+GET    /api/actresses/{id}             详情 + 关联视频
+PATCH  /api/actresses/{id}             编辑演员
+DELETE /api/actresses/{id}             有关联视频时 409
+PATCH  /api/actresses/{id}/favorite    {favorite}
+POST   /api/actresses/{id}/cover       上传封面
+PUT    /api/actresses/{id}/cover       {url} 下载封面
+
+PATCH  /api/scan-roots/{id}            {path?, scan_interval_minutes?, enabled?}
+POST   /api/scrapes                    {root_id?, video_ids?, force?, overwrite_manual?}
+POST   /api/scans                      {root_id?, full?}（按目录创建任务）
+GET    /api/sources?type=             视频源/演员源
+POST   /api/sources/test               视频源与演员源测试
+```
+
+### 14.7 前端结构
+
+- 左侧菜单：
+  - 视频（海报墙；卡片展示必填项，有番号时额外显示番号）
+  - 演员（海报墙；卡片展示姓名、出生日期、国籍、封面、收录视频数量）
+  - 收藏（可展开：收藏的视频、收藏的演员）
+  - 底部：深/浅主题、设置
+- 不提供"文件缺失"菜单或筛选；视频页保留"刮削不完整/失败"筛选。
+- 视频与演员均支持"编辑全部信息"表单；演员多选支持就地新建；标签为多值编辑器。
+- 设置改为**不可拖动的弹窗**，左侧设置项、右侧内容：
+  - 目录管理：目录行 + 统计 + 手动扫描/批量刮削/扫描设置/编辑/删除 + 添加目录
+  - 播放器：探测结果、自定义路径与参数
+  - 刮削源：源列表 + 图形化表单（视频源/演员源），常用字段图形化，保留"高级 YAML"兜底；支持多源、启用/禁用、优先级、测试
+- 批量刮削与扫描进度直接显示在对应目录行。
+
+### 14.8 实施顺序
+
+1. **数据与编辑基础**：迁移（演员表/关联表/收藏/新字段/扫描统计）、完整度计算、手动编辑 API、封面上传与缓存。
+2. **视频页面**：菜单与路由、视频卡片字段、全部信息编辑、收藏、文件缺失/不完整筛选。
+3. **演员体系**：演员海报墙、详情、视频数量、收藏、删除约束。
+4. **刮削引擎**：视频多源合并、演员源、演员详情抓取、批量刮削与进度。
+5. **设置重构**：弹窗、目录管理统计/路径编辑/自动扫描、图形化源配置与测试。
+
+### 14.9 默认约定
+
+- 自动扫描默认关闭（`0`）；建议最小间隔 5 分钟。
+- 批量刮削默认只处理不完整视频；"扫描后自动刮削"暂不默认开启。
+- 图片格式 jpeg/png/webp，默认上限 10MB。
+- 国家/地区为自由文本；有码状态为 `censored/uncensored/unknown`。
+- 演员别名合并 UI 后续实现，当前先保留 `aliases` 字段并自动创建演员。

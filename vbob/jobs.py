@@ -22,9 +22,15 @@ class JobManager:
         self._cancels: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def start(self, job_type: str, payload: dict[str, Any], target: JobTarget) -> str:
+    def start(
+        self,
+        job_type: str,
+        payload: dict[str, Any],
+        target: JobTarget,
+        root_id: int | None = None,
+    ) -> str:
         job_id = uuid.uuid4().hex
-        self.store.create_job(job_id, job_type, payload)
+        self.store.create_job(job_id, job_type, payload, root_id=root_id)
         event = threading.Event()
         with self._lock:
             self._cancels[job_id] = event

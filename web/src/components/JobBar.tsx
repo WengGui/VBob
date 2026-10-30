@@ -1,13 +1,14 @@
 import type { Job } from "../api";
 import { ScanIcon } from "./Icons";
 
-const LABELS: Record<Job["status"], string> = {
-  queued: "排队中",
-  running: "扫描中",
-  succeeded: "扫描完成",
-  failed: "扫描失败",
-  canceled: "已取消",
-};
+function labelOf(job: Job): string {
+  const verb = job.type.startsWith("scrape") ? "刮削" : "扫描";
+  if (job.status === "queued") return "排队中";
+  if (job.status === "running") return `${verb}中`;
+  if (job.status === "succeeded") return `${verb}完成`;
+  if (job.status === "failed") return `${verb}失败`;
+  return "已取消";
+}
 
 const COLORS: Record<Job["status"], string> = {
   queued: "text-sky-600 dark:text-sky-400",
@@ -34,7 +35,7 @@ export function JobBar({
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-2.5 text-sm">
         <span className={`inline-flex items-center gap-1.5 font-medium ${COLORS[job.status]}`}>
           <ScanIcon className={active ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
-          {LABELS[job.status]}
+          {labelOf(job)}
         </span>
         <div className="h-1.5 min-w-32 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
           {percent === null ? (

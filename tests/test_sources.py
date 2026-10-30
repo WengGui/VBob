@@ -72,3 +72,20 @@ def test_missing_query_source_requires_feature(client: TestClient) -> None:
     response = client.post("/api/sources", json=config)
     assert response.status_code == 422
     assert "feature" in response.json()["error"]["message"]
+
+
+def test_actress_source_allowed(client: TestClient) -> None:
+    config = {
+        "name": "actress-demo",
+        "enabled": True,
+        "priority": 50,
+        "type": "actress",
+        "request": {"url": "https://example.com/star/{actress_name}"},
+        "extract": {
+            "birth_date": "css: .birth@text",
+            "nationality": "css: .country@text",
+        },
+    }
+    response = client.post("/api/sources", json=config)
+    assert response.status_code == 201, response.text
+    assert response.json()["config"]["type"] == "actress"

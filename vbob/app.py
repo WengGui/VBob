@@ -20,6 +20,7 @@ from .config import default_data_dir
 from .db import Database
 from .errors import VBobError
 from .jobs import JobManager
+from .scheduler import ScanScheduler
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -56,19 +57,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved_data_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("covers", "screenshots", "logs"):
-            (resolved_data_dir / name).mkdir(exist_ok=True)
+        for name in ("covers", "covers/videos", "covers/actresses", "screenshots", "logs"):
+            (resolved_data_dir / name).mkdir(parents=True, exist_ok=True)
         db = Database(resolved_data_dir / "vbob.db")
         db.migrate()
         store = Store(db)
         jobs = JobManager(store)
         jobs.recover()
+        scheduler = ScanScheduler(store, jobs)
+        scheduler.start()
         app.state.db = db
         app.state.store = store
         app.state.jobs = jobs
+        app.state.scheduler = scheduler
         app.state.data_dir = resolved_data_dir
         log.info("VBob ready, data dir: %s", resolved_data_dir)
-        yield
+        try:
+            yield
+        finally:
+            scheduler.stop()
 
     app = FastAPI(title="VBob", version=__version__, lifespan=lifespan)
     app.state.data_dir = resolved_data_dir

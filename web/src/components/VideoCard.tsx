@@ -1,17 +1,18 @@
 import type { Video } from "../api";
 import {
+  censoredLabel,
   chipsOf,
   codeOf,
   durationOf,
+  formatDay,
   formatDuration,
   gradient,
-  releaseYear,
   titleOf,
 } from "../format";
 import {
-  CalendarIcon,
   ClockIcon,
   FilmIcon,
+  HeartIcon,
   InfoIcon,
   PlayIcon,
   StudioIcon,
@@ -32,17 +33,20 @@ export function VideoCard({
   onSelect,
   onPlay,
   onDelete,
+  onFavorite,
 }: {
   video: Video;
   onSelect: (id: number) => void;
   onPlay: (id: number) => void;
   onDelete: (id: number) => void;
+  onFavorite: (id: number, favorite: boolean) => void;
 }) {
   const code = codeOf(video);
   const title = titleOf(video);
   const duration = formatDuration(durationOf(video));
-  const year = releaseYear(video);
+  const release = formatDay(video.metadata?.release_date ?? null);
   const chips = chipsOf(video);
+  const censored = censoredLabel(video.metadata?.censored);
 
   return (
     <article className="group overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-sky-300 hover:shadow-xl hover:shadow-zinc-300/40 dark:border-white/10 dark:bg-zinc-900/80 dark:hover:border-sky-400/40 dark:hover:shadow-black/40">
@@ -71,14 +75,18 @@ export function VideoCard({
           </div>
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-transparent" />
-        {!video.present && (
-          <span className="absolute left-2.5 top-2.5 rounded-md bg-amber-400 px-2 py-0.5 text-[11px] font-semibold text-amber-950 shadow">
-            文件缺失
-          </span>
-        )}
-        <span className="absolute bottom-2.5 right-2.5 rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur">
-          {video.present ? "本地文件" : "未找到"}
-        </span>
+        <div className="absolute left-2.5 top-2.5 flex gap-1">
+          {censored && (
+            <span className="rounded-md bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur">
+              {censored}
+            </span>
+          )}
+          {!video.metadata?.is_complete && (
+            <span className="rounded-md bg-amber-400 px-2 py-0.5 text-[11px] font-semibold text-amber-950">
+              待补全
+            </span>
+          )}
+        </div>
       </button>
 
       <div className="p-3.5">
@@ -97,35 +105,23 @@ export function VideoCard({
               {title}
             </span>
           </div>
-          {code && code !== title && (
-            <p className="mt-1 line-clamp-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-              {video.filename}
-            </p>
-          )}
         </button>
 
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-          {duration && (
+          {release && (
             <span className="inline-flex items-center gap-1">
               <ClockIcon className="h-3.5 w-3.5" />
-              {duration}
+              {release}
             </span>
           )}
-          {year && (
-            <span className="inline-flex items-center gap-1">
-              <CalendarIcon className="h-3.5 w-3.5" />
-              {year}
-            </span>
-          )}
+          {duration && <span>{duration}</span>}
           {video.metadata?.studio && (
-            <span className="inline-flex items-center gap-1">
-              <StudioIcon className="h-3.5 w-3.5" />
-              {video.metadata.studio}
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <StudioIcon className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{video.metadata.studio}</span>
             </span>
           )}
-          {!duration && !year && !video.metadata?.studio && (
-            <span>{video.present ? "已入库" : "等待重新扫描"}</span>
-          )}
+          {!release && !duration && !video.metadata?.studio && <span>未刮削</span>}
         </div>
 
         <div className="mt-2 flex h-6 flex-wrap gap-1 overflow-hidden">
@@ -153,11 +149,24 @@ export function VideoCard({
           <button
             type="button"
             onClick={() => onSelect(video.id)}
-            title="查看详情"
+            title="查看/编辑详情"
             aria-label="查看详情"
             className="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-zinc-200"
           >
             <InfoIcon className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onFavorite(video.id, !video.favorite)}
+            title={video.favorite ? "取消收藏" : "收藏"}
+            aria-label={video.favorite ? "取消收藏" : "收藏"}
+            className={`rounded-md p-1.5 transition hover:bg-rose-50 dark:hover:bg-rose-500/10 ${
+              video.favorite
+                ? "text-rose-500 dark:text-rose-400"
+                : "text-zinc-400 dark:text-zinc-500"
+            }`}
+          >
+            <HeartIcon filled={video.favorite} className="h-4 w-4" />
           </button>
           <button
             type="button"

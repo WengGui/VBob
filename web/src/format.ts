@@ -87,7 +87,10 @@ export interface TagChip {
 export function chipsOf(video: Video): TagChip[] {
   const metadata = video.metadata;
   const chips: TagChip[] = [];
-  for (const actress of metadata?.actresses ?? []) {
+  const actresses = video.actresses?.length
+    ? video.actresses.map((actress) => actress.name)
+    : metadata?.actresses ?? [];
+  for (const actress of actresses) {
     chips.push({ label: actress, tone: "violet" });
   }
   for (const tag of [...(metadata?.genres ?? []), ...(metadata?.tags ?? [])]) {
@@ -95,9 +98,15 @@ export function chipsOf(video: Video): TagChip[] {
   }
   if (chips.length === 0) {
     chips.push({
-      label: metadata?.scrape_status === "success" ? "已刮削" : "未刮削",
+      label: metadata?.is_complete ? "已刮削" : "未刮削",
       tone: "neutral",
     });
   }
   return chips.slice(0, 8);
+}
+
+export function censoredLabel(value: string | null | undefined): string | null {
+  if (value === "censored") return "有码";
+  if (value === "uncensored") return "无码";
+  return null;
 }
