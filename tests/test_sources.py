@@ -89,3 +89,33 @@ def test_actress_source_allowed(client: TestClient) -> None:
     response = client.post("/api/sources", json=config)
     assert response.status_code == 201, response.text
     assert response.json()["config"]["type"] == "actress"
+
+
+def test_restore_default_sources(client: TestClient) -> None:
+    response = client.post("/api/sources/restore-defaults")
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    names = {item["name"] for item in items}
+    assert {"javBus", "javBusActress"} <= names
+    # 默认源可编辑，且重复恢复不会产生重复记录。
+    assert all(item["builtin"] is False for item in items)
+    again = client.post("/api/sources/restore-defaults").json()["items"]
+    assert len(again) == len(items)
+
+
+def test_default_sources_seed_only_once(tmp_path) -> None:
+    from vbob.db import Database
+    from vbob.store import Store
+
+    db = Database(tmp_path / "vbob.db")
+    db.migrate()
+    store = Store(db)
+    assert store.seed_default_sources() == 2
+    assert store.seed_default_sources() == 0
+
+    # 删除后不会在下次启动自动恢复，但“恢复默认源”可以补齐。
+    first = store.list_sources()[0]
+    store.delete_source(first["id"])
+    assert len(store.list_sources()) == 1
+    restored = store.restore_default_sources()
+    assert {source["name"] for source in restored} == {"javBus", "javBusActress"}

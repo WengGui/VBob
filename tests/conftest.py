@@ -8,7 +8,7 @@ from vbob.app import create_app
 
 @pytest.fixture
 def app(tmp_path):
-    return create_app(tmp_path / "data")
+    return create_app(tmp_path / "data", seed_defaults=False)
 
 
 @pytest.fixture

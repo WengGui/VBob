@@ -1,7 +1,9 @@
+/* 全局样式入口：引入 Tailwind，并声明基于根节点 .dark 类的暗色变体。 */
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* 让浏览器原生控件跟随应用主题。 */
 :root {
   color-scheme: light;
 }
@@ -10,6 +12,7 @@
   color-scheme: dark;
 }
 
+/* 基础布局：让根节点至少铺满视口。 */
 html,
 body,
 #root {
@@ -28,6 +31,7 @@ body {
   background: rgb(14 165 233 / 0.3);
 }
 
+/* 全局细化滚动条，暗色模式单独调整滑块颜色。 */
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(161 161 170 / 0.6) transparent;

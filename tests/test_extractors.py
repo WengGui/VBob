@@ -50,3 +50,61 @@ def test_title_with_chinese_brackets() -> None:
     features = extract("【中字】My.Show.2021.1080p.mp4")
     assert features["year"] == 2021
     assert "My Show" in features["title"]
+
+
+def test_episode_grouping_by_folder_and_number() -> None:
+    first = extract("光与影的传说1.rmvb", dirs=("光与影的传说",))
+    third = extract("光与影的传说3.rmvb", dirs=("光与影的传说",))
+    assert first["title"] == "光与影的传说"
+    assert first["is_episode"] is True
+    assert first["episode"] == 1
+    assert first["episode_key"] == third["episode_key"]
+
+    # 外传与正片共享前缀但标题不同，应单独成组。
+    side = extract("光与影的传说外传1.rmvb", dirs=("光与影的传说",))
+    assert side["episode_key"] != first["episode_key"]
+    assert side["title"] == "光与影的传说外传"
+
+
+def test_episode_only_filename_uses_folder_title() -> None:
+    features = extract("第3集.rmvb", dirs=("光与影的传说",))
+    assert features["title"] == "光与影的传说"
+    assert features["episode"] == 3
+    assert features["episode_key"]
+
+    numeric = extract("03.mp4", dirs=("某部剧",))
+    assert numeric["title"] == "某部剧"
+    assert numeric["episode"] == 3
+
+
+def test_episode_markers_and_sequel_guard() -> None:
+    episode = extract("The Lair Episode 1.mp4", dirs=("The Lair",))
+    assert episode["title"] == "The Lair"
+    assert episode["episode_key"]
+
+    season = extract("Show.S01E03.mkv", dirs=("Show",))
+    assert season["title"] == "Show"
+    assert season["episode"] == "S01E03"
+
+    # 独立续集不应仅因结尾数字被当成剧集。
+    sequel = extract("Toy Story 2.mp4", dirs=("Toy Story 2",))
+    assert "episode_key" not in sequel
+    assert sequel["title"] == "Toy Story 2"
+
+
+def test_episode_key_scoped_to_parent_folder() -> None:
+    a = extract("Show1.mp4", dirs=("Show",))
+    b = extract("Show1.mp4", dirs=("Show",))
+    assert a["episode_key"] == b["episode_key"]
+
+    other = FeaturePipeline().extract(
+        FileRef(filename="Show1.mp4", rel_path="其他/Show/Show1.mp4", dirs=("Show",))
+    )
+    assert other["episode_key"] != a["episode_key"]
+
+
+def test_chinese_episode_number() -> None:
+    features = extract("某剧 第十二集.mp4", dirs=("某剧",))
+    assert features["title"] == "某剧"
+    assert features["episode"] == 12
+    assert features["episode_key"]

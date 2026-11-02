@@ -1,3 +1,14 @@
+"""刮削引擎：按源配置请求页面/接口，提取并归一化字段后写入数据库。
+
+关键流程：
+1. SourceRunner 完成单次请求：占位符填充、浏览器请求头、重试/限流、
+   编码探测、CSS/XPath/JSON/Regex 提取与字段归一化；
+2. Scraper 按 feature 源、query 源的顺序累加字段，下载封面并落库；
+3. 视频落库后，再依据结构化演员链接补全演员资料。
+
+单个源或单个字段的失败会被记录，但不会中断整批刮削。
+"""
+
 from __future__ import annotations
 
 import html
@@ -21,6 +32,7 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
+# 伪装成真实浏览器，部分站点（尤其是年龄验证页）会拒绝非浏览器 UA。
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
@@ -38,8 +50,11 @@ DEFAULT_HEADERS = {
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
 }
+# 命中这些标题通常说明拿到的是 404/检索结果/错误页，应判定为无效匹配。
 DEFAULT_DENY = ("404", "not found", "page not found", "検索結果", "エラー", "找不到")
+# 配置模板中的 {name} 占位符；普通占位符在填充时会做 URL 编码。
 PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# 记录每个 host 上次请求时间（monotonic），用于按 qps 限流。
 _LAST_REQUEST: dict[str, float] = {}
 
 VIDEO_FIELDS = {
@@ -54,11 +69,13 @@ ACTRESS_FIELDS = {
 
 
 class _SkipSource(Exception):
-    pass
+    """源配置缺少必要占位符或 URL 非法时抛出，用于静默跳过该源。"""
 
 
 @dataclass
 class SourceResult:
+    """单个源的成功结果：归一化字段、演员、匹配依据与原始数据摘要。"""
+
     source_name: str
     fields: dict[str, Any]
     actresses: list[dict[str, str]]
@@ -67,12 +84,15 @@ class SourceResult:
 
 
 class SourceRunner:
+    """执行单个源的 HTTP 请求与字段提取，不直接访问业务数据库。"""
+
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
 
     def run(
         self, source: dict[str, Any], values: dict[str, Any]
     ) -> tuple[SourceResult | None, str | None]:
+        """执行一个源，返回 (结果, 错误信息)；跳过该源时返回 (None, 原因)。"""
         config = source["config"]
         request = config.get("request") or {}
         try:
@@ -82,6 +102,7 @@ class SourceRunner:
 
         method = str(request.get("method", "GET")).upper()
         headers = dict(DEFAULT_HEADERS)
+        # 源配置的自定义头（如 Referer、Cookie）覆盖默认浏览器头。
         headers.update(
             {str(k): str(v) for k, v in (request.get("headers") or {}).items()}
         )
@@ -93,6 +114,7 @@ class SourceRunner:
 
         self._throttle(url, request.get("rate_limit") or {})
 
+        # 按源配置重试；退避上限 2 秒，避免批量刮削被慢站点拖住。
         last_error = ""
         response: httpx.Response | None = None
         for attempt in range(retries + 1):
@@ -118,6 +140,7 @@ class SourceRunner:
             return None, last_error or "请求失败"
 
         text = _decode(response.content, response, encoding)
+        # 部分站点会跳转到年龄验证页：页面可访问但没有目标内容。
         if "driver-verify" in str(response.url):
             return None, "站点要求年龄验证，请配置有效 Cookies 或更换源"
         selector = Selector(text=text, base_url=str(response.url))
@@ -140,9 +163,11 @@ class SourceRunner:
                 if not isinstance(expression, str):
                     continue
                 expression = expression.strip()
+                # 以 "| array" 结尾表示该字段应返回列表，而不是第一项。
                 multi = expression.lower().endswith("| array")
                 if multi:
                     expression = expression[: -len("| array")].strip()
+                # 只有真正用到 json: 表达式时才解析 JSON，避免无谓开销。
                 if expression.startswith("json:") and json_data is None:
                     json_data = json.loads(text)
                 value = _extract_expression(
@@ -161,11 +186,13 @@ class SourceRunner:
             except Exception as exc:  # noqa: BLE001 - one bad field should not kill the source
                 warnings.append(f"{field}: {exc}")
 
+        # 标题命中错误页特征时丢弃整个结果，避免把 404 页写成元数据。
         deny = tuple(config.get("deny_title_patterns") or DEFAULT_DENY)
         title = fields.get("title")
         if title and any(pattern.lower() in str(title).lower() for pattern in deny):
             return None, f"疑似错误页：{title}"
 
+        # 默认值只补充缺失字段，不覆盖已提取到的值（优先级最低）。
         for field, default in (config.get("defaults") or {}).items():
             if field in fields or field == "actresses":
                 continue
@@ -181,6 +208,7 @@ class SourceRunner:
                 message += f"（{warnings[0]}）"
             return None, message
 
+        # 仅有字符串演员名时统一转成结构化条目，方便上层处理。
         if actress_names and not actress_specs:
             actress_specs = [{"name": name} for name in actress_names]
 
@@ -205,6 +233,11 @@ class SourceRunner:
 
     @staticmethod
     def _fill_placeholders(template: str, values: dict[str, Any]) -> str:
+        """把 URL 模板中的 {name} 替换为已转义的值。
+
+        普通占位符做完整 percent-encoding；*_url 占位符原样保留，
+        否则会把 https:// 中的 :// 也编码掉导致地址失效。
+        """
         def replace(match: re.Match[str]) -> str:
             key = match.group(1)
             value = values.get(key)
@@ -212,6 +245,7 @@ class SourceRunner:
                 raise _SkipSource(f"缺少占位符 {{{key}}}")
             text = str(value)
             if key == "actress_url" or key.endswith("_url"):
+                # URL 类占位符不能再编码，只校验协议，避免破坏路径与查询串。
                 if urlsplit(text).scheme not in {"http", "https"}:
                     raise _SkipSource(f"占位符 {{{key}}} 不是有效 URL")
                 return text
@@ -221,6 +255,7 @@ class SourceRunner:
 
     @staticmethod
     def _throttle(url: str, rate_limit: dict[str, Any]) -> None:
+        """按 host 维度的 qps 限流；未配置或配置非法时直接放行。"""
         try:
             qps = float(rate_limit.get("qps", 0) or 0)
         except (TypeError, ValueError):
@@ -241,7 +276,9 @@ class SourceRunner:
         base_url: str,
         config: dict[str, Any],
     ) -> list[dict[str, str]]:
+        """提取带链接的演员条目（name/url），供后续演员详情刮削。"""
         selector_expr = str(spec.get("selector", "")).strip()
+        # 选择器支持 css:/xpath: 前缀，缺省按 CSS 处理。
         if selector_expr.startswith("css:"):
             nodes = selector.css(selector_expr[4:].strip())
         elif selector_expr.startswith("xpath:"):
@@ -258,12 +295,15 @@ class SourceRunner:
                 continue
             item = {"name": name}
             if url:
+                # 相对链接基于当前页面地址补全为绝对 URL。
                 item["url"] = _absolute_url(url, base_url, config)
             result.append(item)
         return result
 
 
 class Scraper:
+    """面向业务层的刮削入口：编排多个源、写库并触发演员补全。"""
+
     def __init__(self, store: Store, data_dir: Path, job_id: str | None = None) -> None:
         self.store = store
         self.data_dir = data_dir
@@ -271,6 +311,7 @@ class Scraper:
         self.runner = SourceRunner(data_dir)
 
     def _sources(self) -> list[dict[str, Any]]:
+        """返回已启用的源，顺序沿用 store 中的优先级排序。"""
         return [source for source in self.store.list_sources() if source["enabled"]]
 
     def scrape_video(
@@ -280,19 +321,30 @@ class Scraper:
         force: bool = False,
         overwrite_manual: bool = False,
     ) -> dict[str, Any]:
+        """刮削单个视频，返回含 status/sources/errors 的结果字典。
+
+        force=False 且资料已完整时直接跳过；force=True 可强制重新拉取。
+        overwrite_manual 控制是否覆盖用户手动编辑过的字段。
+        """
         detail = self.store.get_video(video_id)
         video = detail["video"]
         meta = detail["metadata"] or {}
+        # 已完整且非强制时省去网络请求。
         if meta.get("is_complete") and not force:
             return {"status": "skipped", "message": "资料已完整"}
 
         features = video.get("features") or {}
+        # 占位符取值：已有元数据优先，其次用文件名提取的特征。
+        # jav_code 必须单独覆盖：用户手动修正番号后，源匹配仍会读取 features，
+        # 如果不回填会继续使用旧的/缺失的提取结果而跳过源。
         values = dict(features)
         values["title"] = meta.get("title") or features.get("title")
         values["year"] = meta.get("year") or features.get("year")
         values["code"] = meta.get("code") or features.get("jav_code")
+        values["jav_code"] = values["code"]
         manual = set(meta.get("manual_fields") or [])
         sources = self._sources()
+        # feature 源靠文件名特征直接拼接 URL；query 源需要标题搜索。
         feature_sources = [
             source for source in sources if source["config"].get("type") == "feature"
         ]
@@ -310,6 +362,7 @@ class Scraper:
         for source in [*feature_sources, *query_sources]:
             config = source["config"]
             source_type = config.get("type")
+            # 缺少 feature 或标题时跳过对应源，避免发起必然失败的请求。
             if source_type == "feature" and not values.get(config.get("feature")):
                 continue
             if source_type == "query" and not values.get("title"):
@@ -326,9 +379,11 @@ class Scraper:
                 )
                 continue
             assert result is not None
+            # 先到先得：多个源时保留首个非空值。
             for key, value in result.fields.items():
                 if key not in accumulated and value not in (None, "", []):
                     accumulated[key] = value
+            # 演员资料只取第一个提供了结构化链接的源。
             if result.actresses and not actress_refs:
                 actress_refs = [
                     item for item in result.actresses if item.get("name")
@@ -356,6 +411,7 @@ class Scraper:
             }
 
         cover_url = accumulated.get("cover_url")
+        # 手动维护过封面且不覆盖时，跳过下载。
         if cover_url and ("cover_local" not in manual or overwrite_manual):
             try:
                 data = download_image(str(cover_url))
@@ -384,6 +440,7 @@ class Scraper:
             video_id, matched_sources, sorted(accumulated),
         )
 
+        # 视频落库后，再按关联演员逐个补全资料。
         updated = self.store.get_video(video_id)
         for actress in updated.get("actresses", []):
             try:
@@ -408,6 +465,7 @@ class Scraper:
         force: bool = False,
         overwrite_manual: bool = False,
     ) -> dict[str, Any]:
+        """刮削单个演员资料；只接受 ACTRESS_FIELDS 中的字段。"""
         detail = self.store.get_actress(actress_id)
         actress = detail["actress"]
         if actress.get("is_complete") and not force:
@@ -419,6 +477,7 @@ class Scraper:
         if not sources:
             return {"status": "no_source"}
 
+        # 以演员名或已有 profile_url 作为源模板占位符。
         values = {
             "actress_name": actress["name"],
             "name": actress["name"],
@@ -451,6 +510,7 @@ class Scraper:
         if not matched_sources:
             return {"status": "failed", "errors": errors}
 
+        # 源未返回 profile_url 时沿用触发刮削时的链接。
         actress_url = str(values.get("actress_url") or "")
         if actress_url:
             accumulated.setdefault("profile_url", actress_url)
@@ -491,12 +551,14 @@ class Scraper:
         cancel_event: Any = None,
         progress: Any = None,
     ) -> dict[str, int]:
+        """批量刮削某个目录下的视频，逐个执行并汇总计数。"""
         video_ids = self.store.list_video_ids_for_scrape(root_id, force=force)
         total = len(video_ids)
         counts = {"success": 0, "no_match": 0, "failed": 0, "skipped": 0, "errors": 0}
         progress_cb = progress or (lambda **_: None)
         progress_cb(done=0, total=total, message=f"准备刮削 {total} 个视频")
         for index, video_id in enumerate(video_ids, start=1):
+            # 每个视频前检查取消标记，保证任务能及时停止。
             if cancel_event is not None and cancel_event.is_set():
                 raise JobCanceled()
             try:
@@ -509,6 +571,7 @@ class Scraper:
                 if outcome.get("errors"):
                     counts["errors"] += len(outcome["errors"])
             except Exception as exc:  # noqa: BLE001 - continue with the next video
+                # 单个视频异常不终止整批，继续处理下一个。
                 counts["failed"] += 1
                 counts["errors"] += 1
                 log.exception("batch scrape failed video=%s", video_id)
@@ -528,6 +591,7 @@ class Scraper:
 
 
 def _parse_cookies(value: Any) -> dict[str, str]:
+    """把字典或 "a=1; b=2" 形式的 Cookie 配置统一解析为字典。"""
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items()}
     if isinstance(value, str) and value.strip():
@@ -541,23 +605,28 @@ def _parse_cookies(value: Any) -> dict[str, str]:
 
 
 def _decode(content: bytes, response: httpx.Response, setting: str) -> str:
+    """按 配置 > 响应头 > HTML meta > 自动探测 的顺序确定页面编码。"""
+    # 1. 显式配置的编码优先。
     if setting and setting.lower() != "auto":
         try:
             return content.decode(setting, errors="replace")
         except LookupError:
             pass
+    # 2. 使用 httpx 从响应头/meta 解析出的编码。
     charset = response.charset_encoding
     if charset:
         try:
             return content.decode(charset, errors="replace")
         except (LookupError, UnicodeDecodeError):
             pass
+    # 3. 在正文前 8KB 中查找 charset 声明。
     match = re.search(rb"charset=[\"']?([\w-]+)", content[:8192], re.IGNORECASE)
     if match:
         try:
             return content.decode(match.group(1).decode("ascii"), errors="replace")
         except (LookupError, UnicodeDecodeError, UnicodeEncodeError):
             pass
+    # 4. 仍无法确定时用 charset_normalizer 探测，最后退回 UTF-8。
     best = from_bytes(content).best()
     if best is not None:
         return str(best)
@@ -571,12 +640,14 @@ def _extract_expression(
     text: str,
     multi: bool,
 ) -> Any:
+    """按前缀分派到 CSS/XPath/JSON/Regex 提取器；multi 决定返回列表还是首项。"""
     expression = expression.strip()
     if expression.startswith("css:"):
         return _css_values(selector, expression[4:].strip(), multi)
     if expression.startswith("xpath:"):
         return _xpath_values(selector, expression[6:].strip(), multi)
     if expression.startswith("json:"):
+        # JSON 提取使用 JMESPath 语法，例如 "data.items[].title"。
         result = jmespath.search(expression[5:].strip(), json_data)
         if multi and isinstance(result, list):
             return result
@@ -585,13 +656,16 @@ def _extract_expression(
         match = re.search(expression[6:].strip(), text, re.IGNORECASE | re.MULTILINE)
         if not match:
             return None
+        # 有捕获组时取第一组，否则返回整个匹配。
         return match.group(1) if match.groups() else match.group(0)
     raise ValueError("未知提取前缀")
 
 
 def _css_values(node: Selector, expression: str, multi: bool) -> Any:
+    """执行 CSS 提取；支持 "selector@attr" 取属性，默认取文本。"""
     selector = expression.strip()
     attr = "text"
+    # 用最后一个 @ 分隔选择器与属性名，例如 "a@href"。
     if "@" in selector:
         selector, attr = selector.rsplit("@", 1)
         selector = selector.strip()
@@ -599,6 +673,7 @@ def _css_values(node: Selector, expression: str, multi: bool) -> Any:
     if not selector:
         raise ValueError("CSS 选择器为空")
     if attr in {"text", ""}:
+        # 未显式写 ::text 时补上，避免取到嵌套元素的拼接文本。
         css = selector if "::" in selector else f"{selector}::text"
     else:
         css = f"{selector}::attr({attr})"
@@ -610,6 +685,7 @@ def _css_values(node: Selector, expression: str, multi: bool) -> Any:
 
 
 def _xpath_values(node: Selector, expression: str, multi: bool) -> Any:
+    """执行 XPath 提取；节点结果为空时回退到 string() 取标量值。"""
     values = [_clean_text(value) for value in node.xpath(expression).getall() if isinstance(value, str)]
     values = [value for value in values if value]
     if not values:
@@ -621,7 +697,9 @@ def _xpath_values(node: Selector, expression: str, multi: bool) -> Any:
 
 
 def _node_value(node: Selector, expression: str) -> str:
+    """在单个节点作用域内取文本或属性，供结构化演员提取使用。"""
     expression = expression.strip() or "@text"
+    # "@href"、"@text" 形式取属性；text 等价于当前节点的字符串值。
     if expression.startswith("@"):
         attr = expression[1:]
         if attr in {"text", ""}:
@@ -637,11 +715,13 @@ def _node_value(node: Selector, expression: str) -> str:
 def _normalize_field(
     field: str, value: Any, base_url: str, config: dict[str, Any]
 ) -> Any:
+    """把原始字符串/列表归一化为目标字段类型（列表、时长、整数、日期等）。"""
     if value is None:
         return None
     if isinstance(value, (dict,)):
         return None
     if isinstance(value, list):
+        # 列表型字段合并所有元素后拆分；其他字段只取第一个非空值。
         items = [value_item for value_item in value if value_item not in (None, "")]
         if field in {"tags", "genres", "actresses", "aliases"}:
             result: list[str] = []
@@ -668,20 +748,24 @@ def _normalize_field(
 
 
 def _split_list(value: str) -> list[str]:
+    """按中英文逗号、顿号、换行、竖线、斜杠拆分列表。"""
     parts = re.split(r"[,，、\n|/]", value)
     return [part.strip() for part in parts if part.strip()]
 
 
 def _parse_int(value: str) -> int | None:
+    """提取字符串中的第一个整数。"""
     match = re.search(r"\d+", value)
     return int(match.group(0)) if match else None
 
 
 def _parse_duration(value: str) -> int | None:
+    """把时长文本统一换算为秒。"""
     text = value.strip()
     if not text:
         return None
     if re.fullmatch(r"\d+", text):
+        # 纯数字：不超过 600 更可能是分钟，否则视为已经是秒。
         number = int(text)
         return number * 60 if number <= 600 else number
     match = re.search(r"(\d+)\s*(?:小时|時間|h)", text, re.IGNORECASE)
@@ -702,6 +786,7 @@ def _parse_duration(value: str) -> int | None:
 
 
 def _normalize_censored(value: str) -> str:
+    """把各种有码/无码表述统一为 censored/uncensored/unknown。"""
     text = value.lower()
     if any(token in text for token in ("无码", "無碼", "無修正", "uncensored", "流出")):
         return "uncensored"
@@ -711,6 +796,7 @@ def _normalize_censored(value: str) -> str:
 
 
 def _normalize_date(value: str) -> str:
+    """把 2024-1-2 / 2024/1/2 / 2024年1月2日 归一化为 YYYY-MM-DD。"""
     text = value.strip()
     match = re.search(r"((?:19|20)\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})", text)
     if match:
@@ -720,10 +806,13 @@ def _normalize_date(value: str) -> str:
 
 
 def _absolute_url(value: str, base_url: str, config: dict[str, Any]) -> str:
+    """把相对地址补全为绝对 URL，静态资源优先使用 asset_base_url 前缀。"""
     if value.startswith(("http://", "https://")):
         return value
+    # 协议相对地址（//cdn...）默认补 https。
     if value.startswith("//"):
         return "https:" + value
+    # 静态资源可能与页面不同域，配置了 asset_base_url 时优先用它。
     asset_base = str(config.get("asset_base_url") or "")
     if asset_base and not value.startswith("/"):
         return urljoin(asset_base if asset_base.endswith("/") else asset_base + "/", value)
@@ -731,4 +820,5 @@ def _absolute_url(value: str, base_url: str, config: dict[str, Any]) -> str:
 
 
 def _clean_text(value: Any) -> str:
+    """转义 HTML 实体、把不换行空格换成普通空格并去除首尾空白。"""
     return html.unescape(str(value)).replace(" ", " ").strip()

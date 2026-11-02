@@ -173,3 +173,92 @@ def test_scrape_without_sources_marks_no_match(
     wait_job(client, response.json()["job_id"])
     metadata = client.get(f"/api/videos/{video_id}").json()["metadata"]
     assert metadata["scrape_status"] == "no_match"
+
+
+def test_scrape_uses_manual_code_when_extraction_missing(
+    client: TestClient, tmp_path: Path, mock_site: str
+) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    # 文件名无法提取出标准番号，模拟用户之后手动修正 code 的情况。
+    (media / "kfa55.com@MKMP527C.mp4").write_bytes(b"video")
+    client.put("/api/settings", json={"scan": {"min_size_mb": 0}})
+    root = client.post("/api/scan-roots", json={"path": str(media)}).json()
+    job = client.post("/api/scans", json={"root_id": root["id"]}).json()
+    wait_job(client, job["job_id"])
+    video = client.get("/api/videos").json()["items"][0]
+    assert "jav_code" not in video["features"]
+
+    response = client.patch(
+        f"/api/videos/{video['id']}/metadata",
+        json={"version": 0, "code": "MKMP-527"},
+    )
+    assert response.status_code == 200, response.text
+
+    source = {
+        "name": "mock-video",
+        "enabled": True,
+        "priority": 10,
+        "type": "feature",
+        "feature": "jav_code",
+        "request": {"url": f"{mock_site}/v/{{jav_code}}", "timeout_ms": 5000},
+        "extract": {"title": "css: h1@text"},
+    }
+    assert client.post("/api/sources", json=source).status_code == 201
+
+    response = client.post(f"/api/videos/{video['id']}/scrape", json={"force": True})
+    job = wait_job(client, response.json()["job_id"])
+    assert job["status"] == "succeeded", job
+
+    metadata = client.get(f"/api/videos/{video['id']}").json()["metadata"]
+    assert metadata["title"] == "Mock Title"
+    # 手动修正的番号不会被源结果覆盖。
+    assert metadata["code"] == "MKMP-527"
+    assert metadata["scrape_status"] == "success"
+
+
+def test_rescan_keeps_manual_code_and_scraped_metadata(
+    client: TestClient, tmp_path: Path, mock_site: str
+) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    video_file = media / "WRONG-999.mp4"
+    video_file.write_bytes(b"video")
+    client.put("/api/settings", json={"scan": {"min_size_mb": 0}})
+    root = client.post("/api/scan-roots", json={"path": str(media)}).json()
+    job = client.post("/api/scans", json={"root_id": root["id"]}).json()
+    wait_job(client, job["job_id"])
+    video = client.get("/api/videos").json()["items"][0]
+    assert video["features"]["jav_code"] == "WRONG-999"
+
+    # 用户把提取错误的番号手动改成正确值。
+    client.patch(
+        f"/api/videos/{video['id']}/metadata",
+        json={"version": 0, "code": "MKMP-527"},
+    )
+    source = {
+        "name": "mock-video",
+        "enabled": True,
+        "priority": 10,
+        "type": "feature",
+        "feature": "jav_code",
+        "request": {"url": f"{mock_site}/v/{{jav_code}}", "timeout_ms": 5000},
+        "extract": {"title": "css: h1@text"},
+    }
+    client.post("/api/sources", json=source)
+    response = client.post(f"/api/videos/{video['id']}/scrape", json={"force": True})
+    wait_job(client, response.json()["job_id"])
+    metadata = client.get(f"/api/videos/{video['id']}").json()["metadata"]
+    assert metadata["code"] == "MKMP-527"
+    assert metadata["title"] == "Mock Title"
+
+    # 文件发生变化触发重新提取特征，再扫描一次：元数据和手动番号必须保留。
+    video_file.write_bytes(b"changed video content")
+    job = client.post("/api/scans", json={"root_id": root["id"]}).json()
+    wait_job(client, job["job_id"])
+    after = client.get(f"/api/videos/{video['id']}").json()
+    assert after["metadata"]["code"] == "MKMP-527"
+    assert after["metadata"]["title"] == "Mock Title"
+    assert after["metadata"]["scrape_status"] == "success"
+    # 文件名中仍然是错误番号，但记录没有被重新刮削或覆盖。
+    assert after["video"]["features"]["jav_code"] == "WRONG-999"

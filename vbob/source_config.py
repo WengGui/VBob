@@ -1,3 +1,9 @@
+"""刮削源配置校验：把外部 YAML/JSON 规范化为引擎可用的配置对象。
+
+校验覆盖源类型、请求地址、提取表达式前缀、默认值与校验器结构；
+所有错误统一抛出 InvalidError，便于接口层原样返回给用户。
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -6,20 +12,27 @@ from urllib.parse import urlsplit
 
 from .errors import InvalidError
 
+# feature：按文件名特征拼接 URL；query：按标题搜索；actress：演员资料。
 SOURCE_TYPES = {"feature", "query", "actress"}
+# 提取表达式必须以这些前缀之一开头，决定使用哪种解析器。
 EXTRACT_PREFIXES = {"css", "xpath", "json", "regex"}
 
 
 def _non_empty_str(value: Any, field: str) -> str:
+    """校验非空字符串并返回去掉首尾空白后的值。"""
     if not isinstance(value, str) or not value.strip():
         raise InvalidError(f"{field} 必须是非空字符串")
     return value.strip()
 
 
 def validate_source_config(config: Any) -> dict[str, Any]:
-    """Validate and normalize a source configuration (already parsed from YAML/JSON)."""
+    """校验并规范化源配置（入参应已从 YAML/JSON 解析）。
+
+    返回新的配置字典，不修改调用方传入的对象。
+    """
     if not isinstance(config, dict):
         raise InvalidError("源配置必须是 YAML/JSON 对象")
+    # 深拷贝后再改写，避免副作用影响调用方。
     data = deepcopy(config)
 
     data["name"] = _non_empty_str(data.get("name"), "name")
@@ -46,6 +59,7 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise InvalidError("request 必须是对象")
     url = _non_empty_str(request.get("url"), "request.url")
+    # 演员源允许纯占位符 URL；其余源必须是完整的 http(s) 地址。
     if url != "{actress_url}":
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -63,6 +77,7 @@ def validate_source_config(config: Any) -> dict[str, Any]:
         if not isinstance(field, str) or not field.strip():
             raise InvalidError("extract 的字段名必须是非空字符串")
         if isinstance(expression, dict):
+            # 只有 actresses 支持结构化对象；其余字段必须是表达式字符串。
             if field != "actresses":
                 raise InvalidError(f"extract.{field} 必须是非空字符串")
             unknown = set(expression) - {"selector", "name", "url"}
@@ -89,11 +104,13 @@ def validate_source_config(config: Any) -> dict[str, Any]:
                 f"extract.{field} 需要以 css: / xpath: / json: / regex: 开头"
             )
 
+    # validators 目前只做结构校验，具体规则由引擎消费。
     validators = data.get("validators", [])
     if not isinstance(validators, list) or not all(isinstance(item, dict) for item in validators):
         raise InvalidError("validators 必须是对象数组")
     data["validators"] = validators
 
+    # defaults 是提取失败时的兜底值，只允许标量或数组。
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):
         raise InvalidError("defaults 必须是对象")

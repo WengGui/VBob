@@ -1,3 +1,8 @@
+/**
+ * 演员资料编辑弹窗。
+ * 将表单中的字符串还原为后端的数值/空值字段，提交时携带版本号防止并发覆盖；
+ * 封面处理策略与视频编辑一致：上传文件优先于图片 URL。
+ */
 import { useState } from "react";
 import type { ActressDetail } from "../api";
 import { api } from "../api";
@@ -7,6 +12,7 @@ import { Modal } from "./Modal";
 const INPUT =
   "w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600";
 
+/** 别名等列表输入支持逗号/中文逗号/顿号，统一拆分并去除空白项。 */
 function splitList(value: string): string[] {
   return value
     .split(/[,，、]/)
@@ -22,6 +28,7 @@ function Label({ children }: { children: string }) {
   );
 }
 
+/** 编辑演员资料；保存成功后由父组件关闭弹窗并刷新演员列表/详情。 */
 export function ActressEditModal({
   detail,
   onClose,
@@ -47,6 +54,7 @@ export function ActressEditModal({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // 空输入表示清除该字段；其余值转为整数，非法输入抛出给 save 的错误提示。
   function numberOrNull(value: string): number | null {
     if (!value.trim()) return null;
     const parsed = Number(value);
@@ -58,6 +66,7 @@ export function ActressEditModal({
     setError(null);
     setSaving(true);
     try {
+      // 界面字段名与后端键名逐个对应；version 由详情接口提供。
       await api.updateActress(actress.id, {
         version: actress.version,
         name,
@@ -71,6 +80,7 @@ export function ActressEditModal({
         cup,
         profile_url: profileUrl,
       });
+      // 若同时选择了文件和 URL，只应用文件；URL 仅在未选文件时下载到本地。
       if (coverFile) {
         await api.uploadActressCover(actress.id, coverFile);
       } else if (coverUrl.trim()) {

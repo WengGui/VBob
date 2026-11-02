@@ -1,12 +1,18 @@
+"""默认设置、数据目录解析与配置合并工具。
+
+``DEFAULT_SETTINGS`` 保存完整基线，数据库 settings 表只存覆盖值；
+读取时用 ``deep_merge`` 补齐，写入前由 ``vbob.store.validate_settings`` 统一校验。
+"""
+
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
 APP_NAME = "VBob"
 
+# 设置按分组存库，三个 key 同时也是 update_settings 允许的顶层字段。
 DEFAULT_SETTINGS: dict[str, Any] = {
     "scan": {
         "extensions": [
@@ -30,22 +36,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 
 def default_data_dir() -> Path:
+    """返回默认数据目录 ``<当前工作目录>/data``。
+
+    优先读取 ``VBOB_DATA_DIR``；命令行 ``--data-dir`` 在调用侧覆盖此默认值。
+    """
     env = os.environ.get("VBOB_DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        return base / APP_NAME
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_NAME
-    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "vbob"
+    return (Path.cwd() / "data").resolve()
 
 
 def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """Return a new dict with ``patch`` recursively merged into ``base``."""
+    """递归合并 ``patch`` 到 ``base``，返回新字典且不修改入参。"""
     merged: dict[str, Any] = dict(base)
     for key, value in patch.items():
+        # 两边都是对象时继续下钻；数组、标量和 null 直接覆盖。
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = deep_merge(merged[key], value)
         else:

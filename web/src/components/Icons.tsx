@@ -1,7 +1,12 @@
+/**
+ * 项目内置的线性 SVG 图标集。
+ * 所有图标共用 Icon 包装器以统一尺寸、描边和可访问性；颜色通过 currentColor 继承文本色。
+ */
 import type { ReactNode, SVGProps } from "react";
 
 type IconProps = SVGProps<SVGSVGElement>;
 
+/** 图标基座：默认装饰性隐藏，调用方通过 className 控制尺寸与颜色。 */
 function Icon({ children, ...props }: IconProps & { children: ReactNode }) {
   return (
     <svg
@@ -19,6 +24,7 @@ function Icon({ children, ...props }: IconProps & { children: ReactNode }) {
   );
 }
 
+/** 视频/胶片图标。 */
 export function FilmIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -28,6 +34,7 @@ export function FilmIcon(props: IconProps) {
   );
 }
 
+/** 文件缺失警告图标。 */
 export function MissingIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -37,6 +44,7 @@ export function MissingIcon(props: IconProps) {
   );
 }
 
+/** 设置齿轮图标。 */
 export function SettingsIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -46,6 +54,7 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
+/** 浅色主题（太阳）图标。 */
 export function SunIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -55,6 +64,7 @@ export function SunIcon(props: IconProps) {
   );
 }
 
+/** 深色主题（月亮）图标。 */
 export function MoonIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -63,6 +73,7 @@ export function MoonIcon(props: IconProps) {
   );
 }
 
+/** 搜索放大镜图标。 */
 export function SearchIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -72,6 +83,16 @@ export function SearchIcon(props: IconProps) {
   );
 }
 
+/** 随机（交叉箭头）图标。 */
+export function ShuffleIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+    </Icon>
+  );
+}
+
+/** 扫描/刮削取景框图标。 */
 export function ScanIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -81,6 +102,7 @@ export function ScanIcon(props: IconProps) {
   );
 }
 
+/** 播放三角图标。 */
 export function PlayIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -89,6 +111,7 @@ export function PlayIcon(props: IconProps) {
   );
 }
 
+/** 信息/详情图标。 */
 export function InfoIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -98,6 +121,7 @@ export function InfoIcon(props: IconProps) {
   );
 }
 
+/** 删除垃圾桶图标。 */
 export function TrashIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -106,6 +130,7 @@ export function TrashIcon(props: IconProps) {
   );
 }
 
+/** 添加（加号）图标。 */
 export function PlusIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -114,6 +139,7 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+/** 文件夹/扫描目录图标。 */
 export function FolderIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -122,6 +148,7 @@ export function FolderIcon(props: IconProps) {
   );
 }
 
+/** 关闭（叉号）图标。 */
 export function CloseIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -130,6 +157,7 @@ export function CloseIcon(props: IconProps) {
   );
 }
 
+/** 下拉展开箭头图标。 */
 export function ChevronDownIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -138,6 +166,7 @@ export function ChevronDownIcon(props: IconProps) {
   );
 }
 
+/** 时钟/时长图标。 */
 export function ClockIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -147,6 +176,7 @@ export function ClockIcon(props: IconProps) {
   );
 }
 
+/** 日历/日期图标。 */
 export function CalendarIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -156,6 +186,7 @@ export function CalendarIcon(props: IconProps) {
   );
 }
 
+/** 厂商/制片公司图标。 */
 export function StudioIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -164,6 +195,7 @@ export function StudioIcon(props: IconProps) {
   );
 }
 
+/** 标签图标。 */
 export function TagIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -173,6 +205,7 @@ export function TagIcon(props: IconProps) {
   );
 }
 
+/** 用户/演员图标。 */
 export function UserIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -182,6 +215,7 @@ export function UserIcon(props: IconProps) {
   );
 }
 
+/** 收藏心形；filled 使用 currentColor 填充以区分已收藏状态。 */
 export function HeartIcon({ filled, ...props }: IconProps & { filled?: boolean }) {
   return (
     <Icon {...props} fill={filled ? "currentColor" : "none"}>
@@ -190,6 +224,7 @@ export function HeartIcon({ filled, ...props }: IconProps & { filled?: boolean }
   );
 }
 
+/** 编辑（铅笔）图标。 */
 export function EditIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -199,6 +234,7 @@ export function EditIcon(props: IconProps) {
   );
 }
 
+/** 数据库/刮削源图标。 */
 export function DatabaseIcon(props: IconProps) {
   return (
     <Icon {...props}>

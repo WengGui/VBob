@@ -1,7 +1,11 @@
+/**
+ * 演员卡片：展示头像、作品数、基础资料和完整度，点击可打开详情或切换收藏。
+ */
 import type { Actress } from "../api";
 import { formatDay, gradient } from "../format";
 import { HeartIcon, InfoIcon, UserIcon } from "./Icons";
 
+/** 单个演员卡片；onFavorite 传入取反后的目标状态，实际请求由父组件完成。 */
 export function ActressCard({
   actress,
   onSelect,
@@ -21,6 +25,7 @@ export function ActressCard({
         <div className="absolute inset-0" style={{ background: gradient(actress.id + 7) }} />
         {actress.cover_local ? (
           <img
+            // 与视频封面相同，走后端本地封面接口，失败时回退到渐变姓名占位。
             src={`/api/actresses/${actress.id}/cover`}
             alt=""
             loading="lazy"

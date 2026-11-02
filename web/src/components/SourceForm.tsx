@@ -1,3 +1,9 @@
+/**
+ * 刮削源配置表单（新增/编辑共用）。
+ * 后端 config 的 extract 以 "css: 表达式" 这类字符串保存；这里把它拆成可视化行，
+ * 保存时再按相同格式写回，并保留无法识别的额外配置项。
+ * 演员既可使用单一字段提取，也可配置为 { selector, name, url } 结构化链接模式。
+ */
 import { useState } from "react";
 import type { Source } from "../api";
 import { api } from "../api";
@@ -8,6 +14,7 @@ import { PlusIcon, TrashIcon } from "./Icons";
 const INPUT =
   "w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600";
 
+// key 必须与后端元数据字段一致，label 仅用于界面展示。
 interface FieldOption {
   key: string;
   label: string;
@@ -42,12 +49,18 @@ const ACTRESS_FIELDS: FieldOption[] = [
 ];
 const KINDS = ["css", "xpath", "json", "regex"] as const;
 
+// 一行对应 extract 对象中的一个字段配置。
 interface ExtractRow {
   field: string;
   kind: (typeof KINDS)[number];
   expression: string;
 }
 
+/**
+ * 解析已有 extract 配置。
+ * 字符串值形如 "xpath: //h3/text()"；没有可识别前缀时按默认 css 处理。
+ * 结构化的 actresses 对象以及非字符串值不在这里转换成行，保存时原样保留。
+ */
 function parseExtract(config: Record<string, unknown>): ExtractRow[] {
   const extract = config.extract;
   if (!extract || typeof extract !== "object") return [];
@@ -68,6 +81,7 @@ function parseExtract(config: Record<string, unknown>): ExtractRow[] {
     });
 }
 
+/** 源配置弹窗；source 为 null 时表示新增，保存成功后由父组件关闭并刷新列表。 */
 export function SourceForm({
   source,
   onClose,
@@ -77,13 +91,16 @@ export function SourceForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  // 已有配置作为表单初值；request 中未在界面暴露的键会在保存时原样合并回去。
   const config = source?.config ?? {};
   const request = (config.request ?? {}) as Record<string, unknown>;
   const extractConfig = (config.extract ?? {}) as Record<string, unknown>;
+  // 演员字段若是对象，说明使用了“选择器 + 姓名/URL 表达式”的结构化链接模式。
   const structuredActresses =
     extractConfig.actresses && typeof extractConfig.actresses === "object"
       ? (extractConfig.actresses as Record<string, unknown>)
       : null;
+  // 保留无法用行编辑器表达的其他结构化提取配置，避免保存时丢失。
   const extraExtract = Object.fromEntries(
     Object.entries(extractConfig).filter(
       ([field, value]) => typeof value !== "string" && field !== "actresses",
@@ -122,8 +139,10 @@ export function SourceForm({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // 字段下拉项随源类型切换：演员源与视频源允许的元数据字段不同。
   const fieldOptions = type === "actress" ? ACTRESS_FIELDS : VIDEO_FIELDS;
 
+  // 切换类型时把不再合法的字段改为该类型的第一个字段，保留表达式内容供用户修正。
   function changeType(value: string) {
     const options = value === "actress" ? ACTRESS_FIELDS : VIDEO_FIELDS;
     setType(value);
@@ -136,6 +155,7 @@ export function SourceForm({
     );
   }
 
+  // 新增行优先选择尚未使用的字段；全部用过后仍允许重复，交由用户决定。
   function addRow() {
     const used = new Set(rows.map((row) => row.field));
     const next = fieldOptions.find((option) => !used.has(option.key)) ?? fieldOptions[0];
@@ -150,11 +170,14 @@ export function SourceForm({
 
   async function save() {
     setError(null);
+    // 空字段或空表达式视为未配置，不写入 extract。
     const cleaned = rows.filter((row) => row.field.trim() && row.expression.trim());
+    // 结构化演员模式可以只有演员链接配置，无需普通提取行。
     if (!cleaned.length && !(type !== "actress" && actressLinkMode)) {
       setError("至少配置一个提取字段");
       return;
     }
+    // 结构化模式依赖选择器定位每个演员链接，再分别取姓名和 URL，缺一不可。
     if (type !== "actress" && actressLinkMode) {
       if (!actressSelector.trim()) {
         setError("启用演员链接提取时，必须填写演员链接选择器");
@@ -165,6 +188,8 @@ export function SourceForm({
         return;
       }
     }
+    // 每行重新序列化为后端约定的 "kind: expression" 格式，
+    // 并把演员字段留给下方按“简单字段/结构化链接”二选一处理。
     const rowExtract = Object.fromEntries(
       cleaned
         .filter((row) => !(actressLinkMode && row.field.trim() === "actresses"))
@@ -173,15 +198,18 @@ export function SourceForm({
           `${row.kind}: ${row.expression.trim()}`,
         ]),
     );
+    // 合并未知结构化配置和当前行；同名字段以表单值为准。
     const extract: Record<string, unknown> = { ...extraExtract, ...rowExtract };
     if (type !== "actress") {
       if (actressLinkMode) {
+        // 结构化演员链接：在视频页一次抓取姓名和演员详情页 URL。
         extract.actresses = {
           selector: actressSelector.trim(),
           name: actressNameExpr.trim(),
           url: actressUrlExpr.trim(),
         };
       } else {
+        // 简单模式直接使用 actresses 行；取消配置时要删除旧值，防止残留。
         const simpleActresses = cleaned.find((row) => row.field.trim() === "actresses");
         if (simpleActresses) {
           extract.actresses = `${simpleActresses.kind}: ${simpleActresses.expression.trim()}`;
@@ -190,6 +218,8 @@ export function SourceForm({
         }
       }
     }
+    // 保留 source 原有的其他配置，只覆盖表单负责的字段；
+    // request 同样合并，避免丢失 headers、body 等界面未展示的设置。
     const payload: Record<string, unknown> = {
       ...(source?.config ?? {}),
       name: name.trim(),
@@ -199,6 +229,7 @@ export function SourceForm({
       request: { ...request, url: url.trim(), method, encoding },
       extract,
     };
+    // feature 只对“按特征查询”的源有意义，切换类型时清理旧配置。
     if (type === "feature") payload.feature = feature.trim();
     else delete payload.feature;
     setSaving(true);

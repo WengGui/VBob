@@ -69,11 +69,12 @@
 前端不直接调起播放器，也不访问任何本地端口：
 
 ```
-前端 POST /api/videos/{id}/play {player?, seek?}
+前端 POST /api/videos/{id}/play {file_id?, player?, seek?}
         │
         ▼
 后端 PlayerLauncher
-  1. 按 video_id 取出文件路径
+  1. 按 video_id + 可选 file_id 取出文件路径；分组包含多个可用文件时返回
+     `multiple_files`，由前端弹出文件选择框
   2. 校验路径位于已配置的扫描根目录内
   3. 解析播放器（设置指定 > 自动探测 mpv/VLC/PotPlayer）
   4. exec.Command(player, args...)，返回 pid
@@ -82,7 +83,7 @@
    本地播放器
 ```
 
-- 前端只传 `video_id` 与可选的播放器/起播位置，**永远不传文件路径**。
+- 前端只传 `video_id`、可选的 `file_id` 与播放器/起播位置，**永远不传文件路径**。
 - 播放器调用使用参数数组，不经 shell；文件路径作为独立参数传入。
 - 播放器配置：设置项 `playback.player`（名称、可执行文件路径、附加参数模板）；未配置时按平台在 `PATH` 与常见安装目录中探测。
 - 播放失败返回明确原因码（`no_player` / `player_not_found` / `path_not_found` / `path_outside_root`），前端直接展示。
@@ -117,12 +118,14 @@ CREATE TABLE scan_roots (
     created_at  TIMESTAMP
 );
 
--- 文件级信息，扫描阶段写入，与刮削无关
+-- 影片分组：扫描阶段写入，与刮削无关。
+-- 同一目录下番号相同的多个文件（A/B 分段、不同清晰度等）共享一行；
+-- path/filename 等主文件字段指向当前优先播放的文件。
 CREATE TABLE videos (
     id            INTEGER PRIMARY KEY,
     root_id       INTEGER REFERENCES scan_roots(id) ON DELETE SET NULL,
-    path          TEXT NOT NULL,            -- 归一化绝对路径（展示用）
-    path_key      TEXT NOT NULL UNIQUE,     -- 归一化 + 大小写折叠，用于去重
+    path          TEXT NOT NULL,            -- 主文件归一化绝对路径（展示用）
+    path_key      TEXT NOT NULL UNIQUE,     -- 主文件归一化 + 大小写折叠
     filename      TEXT NOT NULL,
     size_bytes    INTEGER,
     mtime         INTEGER,                  -- 文件修改时间（秒），增量扫描依据
@@ -130,9 +133,25 @@ CREATE TABLE videos (
     screenshot    TEXT,                     -- 本地截图相对路径
     features      TEXT,                     -- JSON: 提取出的特征字典
     jav_code      TEXT GENERATED ALWAYS AS (json_extract(features, '$.jav_code')) VIRTUAL,
-    present       INTEGER DEFAULT 1,        -- 0 = 文件已缺失（删除/移动）
+    present       INTEGER DEFAULT 1,        -- 0 = 分组内所有文件均缺失
     missing_since TIMESTAMP,
     scan_status   TEXT DEFAULT 'pending',   -- pending/scanned/error
+    created_at    TIMESTAMP,
+    updated_at    TIMESTAMP
+);
+
+-- 实际播放文件：一部影片可以包含多个文件
+CREATE TABLE video_files (
+    id            INTEGER PRIMARY KEY,
+    video_id      INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL,
+    path_key      TEXT NOT NULL UNIQUE,
+    filename      TEXT NOT NULL,
+    size_bytes    INTEGER,
+    mtime         INTEGER,
+    duration_sec  REAL,
+    present       INTEGER DEFAULT 1,
+    missing_since TIMESTAMP,
     created_at    TIMESTAMP,
     updated_at    TIMESTAMP
 );
@@ -215,6 +234,7 @@ CREATE TABLE scrape_logs (
 
 ```sql
 CREATE INDEX idx_videos_present        ON videos(present);
+CREATE INDEX idx_video_files_video     ON video_files(video_id);
 CREATE INDEX idx_videos_jav_code       ON videos(jav_code);
 CREATE INDEX idx_videos_scan_status    ON videos(scan_status);
 CREATE INDEX idx_metadata_scrape_status ON metadata(scrape_status);

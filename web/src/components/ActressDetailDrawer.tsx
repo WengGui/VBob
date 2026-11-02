@@ -1,3 +1,7 @@
+/**
+ * 演员详情抽屉。
+ * 展示资料完整度、三围等基本信息与收录作品，并提供收藏、刮削、编辑和删除入口。
+ */
 import type { ReactNode } from "react";
 import type { ActressDetail } from "../api";
 import { formatDay, gradient } from "../format";
@@ -11,6 +15,7 @@ import {
   UserIcon,
 } from "./Icons";
 
+/** 演员详情抽屉；detail 为空表示父组件仍在加载演员数据。 */
 export function ActressDetailDrawer({
   detail,
   onClose,
@@ -30,6 +35,7 @@ export function ActressDetailDrawer({
 }) {
   const actress = detail?.actress;
 
+  // 与视频详情一致：遮罩点击关闭，内容区阻止冒泡。
   return (
     <div
       className="fixed inset-0 z-40 flex justify-end bg-black/40 backdrop-blur-sm dark:bg-black/70"
@@ -135,6 +141,7 @@ export function ActressDetailDrawer({
               <Field label="国籍" value={actress.nationality} />
               <Field label="身高" value={actress.height_cm ? `${actress.height_cm} cm` : null} />
               <Field label="罩杯" value={actress.cup} />
+              {/* 三围以 “胸-腰-臀” 组合展示，缺失项用破折号占位。 */}
               <Field
                 label="三围"
                 value={
@@ -199,6 +206,7 @@ export function ActressDetailDrawer({
   );
 }
 
+/** 演员资料字段行；空值不渲染，保持两列布局紧凑。 */
 function Field({ label, value }: { label: string; value: ReactNode }) {
   if (!value) return null;
   return (

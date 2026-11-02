@@ -1,3 +1,8 @@
+/**
+ * 全局设置弹窗，包含目录、播放器和刮削源三个标签页。
+ * 目录列表同时承担扫描进度展示：扫描期间提高刷新频率，平时也定时同步，
+ * 以便看到定时扫描或其他页面触发的任务状态；源编辑交给嵌套的 SourceForm。
+ */
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { api, type PlayerInfo, type ScanRoot, type Source } from "../api";
@@ -12,10 +17,14 @@ import {
   TrashIcon,
   UserIcon,
 } from "./Icons";
+import { PlayerSettingsPanel } from "./PlayerSettingsPanel";
+import { RootDeleteModal } from "./RootDeleteModal";
+import { RootSettingsModal } from "./RootSettingsModal";
 import { SourceForm } from "./SourceForm";
 
 type Tab = "directories" | "players" | "sources";
 
+/** 将源配置中的 type 映射为设置页的中文标签，旧配置缺省视为番号源。 */
 function typeLabel(source: Source): string {
   const type = source.config.type;
   if (type === "actress") return "演员源";
@@ -23,6 +32,10 @@ function typeLabel(source: Source): string {
   return "番号源";
 }
 
+/**
+ * 设置弹窗。
+ * onChanged 用于在目录/源变更后让 App 刷新主列表；refreshKey 变化时重新拉取设置数据。
+ */
 export function SettingsModal({
   onClose,
   onStartScan,
@@ -47,6 +60,10 @@ export function SettingsModal({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ source: Source | null } | null>(null);
+  // 目录编辑弹窗：路径和自动扫描间隔在同一表单中修改。
+  const [rootEditor, setRootEditor] = useState<ScanRoot | null>(null);
+  // 目录删除弹窗：可选择只删数据或连同视频文件一起删除。
+  const [deletingRoot, setDeletingRoot] = useState<ScanRoot | null>(null);
 
   const loadRoots = useCallback(async () => {
     try {
@@ -72,12 +89,14 @@ export function SettingsModal({
     }
   }, []);
 
+  // 首次打开或外部数据变化（refreshKey）时并行加载三类设置数据。
   useEffect(() => {
     void loadRoots();
     void loadSources();
     void loadPlayers();
   }, [loadRoots, loadSources, loadPlayers, refreshKey]);
 
+  // 扫描进行中每秒刷新目录，及时更新内嵌 active_job 的 done/total 进度。
   useEffect(() => {
     if (!scanning) return;
     const timer = window.setInterval(() => {
@@ -86,6 +105,7 @@ export function SettingsModal({
     return () => window.clearInterval(timer);
   }, [scanning, loadRoots]);
 
+  // 即使本页没有发起任务，也低频同步目录（例如定时扫描或后台刮削的状态）。
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadRoots();
@@ -93,12 +113,14 @@ export function SettingsModal({
     return () => window.clearInterval(timer);
   }, [loadRoots]);
 
+  // 设置页的操作反馈使用局部 notice，自动消失以免遮挡面板。
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 4000);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  // 添加目录前去掉首尾空白；间隔输入非法或为空时按 0（关闭自动扫描）处理。
   async function addRoot(event: FormEvent) {
     event.preventDefault();
     const path = newRoot.trim();
@@ -114,46 +136,12 @@ export function SettingsModal({
     }
   }
 
-  async function removeRoot(root: ScanRoot) {
-    if (!window.confirm(`移除扫描目录？\n${root.path}\n\n不会删除文件。`)) return;
-    try {
-      await api.deleteRoot(root.id);
-      await loadRoots();
-      onChanged();
-      setNotice("扫描目录已移除");
-    } catch (removeError) {
-      setError(errorMessage(removeError));
-    }
+  // 删除目录交给 RootDeleteModal 确认；磁盘文件是否删除由用户在弹窗中选择。
+  function removeRoot(root: ScanRoot) {
+    setDeletingRoot(root);
   }
 
-  async function editRootPath(root: ScanRoot) {
-    const path = window.prompt("新的目录地址", root.path);
-    if (!path || path.trim() === root.path) return;
-    try {
-      await api.updateRoot(root.id, { path: path.trim() });
-      await loadRoots();
-      onChanged();
-      setNotice("目录地址已更新，已有记录已按相对路径迁移");
-    } catch (editError) {
-      setError(errorMessage(editError));
-    }
-  }
-
-  async function editRootInterval(root: ScanRoot) {
-    const value = window.prompt(
-      "自动扫描间隔（分钟，0 表示关闭）",
-      String(root.scan_interval_minutes),
-    );
-    if (value === null) return;
-    try {
-      await api.updateRoot(root.id, { scan_interval_minutes: Number(value) || 0 });
-      await loadRoots();
-      setNotice("扫描设置已保存");
-    } catch (editError) {
-      setError(errorMessage(editError));
-    }
-  }
-
+  // 启用状态由后端返回完整 Source 后替换列表项，避免本地构造对象丢失字段。
   async function toggleSource(source: Source) {
     try {
       const updated = await api.updateSourceState(source.id, { enabled: !source.enabled });
@@ -162,6 +150,17 @@ export function SettingsModal({
       );
     } catch (toggleError) {
       setError(errorMessage(toggleError));
+    }
+  }
+
+  // 恢复默认源只在缺失时插入，不会覆盖用户已经修改过的同名配置。
+  async function restoreSources() {
+    try {
+      const data = await api.restoreDefaultSources();
+      setSources(data.items);
+      setNotice("默认刮削源已补齐");
+    } catch (restoreError) {
+      setError(errorMessage(restoreError));
     }
   }
 
@@ -176,6 +175,7 @@ export function SettingsModal({
     }
   }
 
+  // 活动任务优先于上次扫描结果：有 active_job 时按任务类型显示“扫描中/刮削中”。
   function rootStatus(root: ScanRoot): string {
     if (root.active_job) {
       return root.active_job.type === "scan" ? "扫描中" : "刮削中";
@@ -268,6 +268,7 @@ export function SettingsModal({
                   <p className="text-xs text-zinc-500">
                     添加本地视频目录；扫描会建立索引并统计完整度。
                   </p>
+                  {/* 扫描全部会为每个目录分别发起任务。 */}
                   <button
                     type="button"
                     onClick={() => roots.forEach((root) => onStartScan(root.id))}
@@ -294,7 +295,8 @@ export function SettingsModal({
                             </span>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-zinc-500">
-                            <span>已扫描视频 {root.scanned_count ?? 0}</span>
+                            <span>已收录 {root.scanned_count ?? 0} 部</span>
+                            <span>文件 {root.file_count ?? root.scanned_count ?? 0} 个</span>
                             <span>已刮削 {root.scraped_count ?? 0}</span>
                             <span>当前状态：{rootStatus(root)}</span>
                             {root.last_scan_started_at && (
@@ -333,17 +335,10 @@ export function SettingsModal({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void editRootInterval(root)}
+                            onClick={() => setRootEditor(root)}
                             className="rounded-md border border-zinc-200 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
                           >
-                            扫描设置
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void editRootPath(root)}
-                            className="rounded-md border border-zinc-200 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
-                          >
-                            编辑路径
+                            编辑
                           </button>
                           <button
                             type="button"
@@ -358,6 +353,7 @@ export function SettingsModal({
                       {root.active_job && (
                         <div className="mt-3">
                           <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                            {/* 总数未知时保留一段固定长度，表示任务仍在准备/运行。 */}
                             <div
                               className="h-full rounded-full bg-sky-500 transition-all"
                               style={{
@@ -409,42 +405,11 @@ export function SettingsModal({
             )}
 
             {tab === "players" && (
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <p className="text-xs text-zinc-500">
-                    播放由后端直接调起本机播放器，优先使用设置中的播放器路径。
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void loadPlayers()}
-                    className="rounded-md border border-zinc-200 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
-                  >
-                    重新检测
-                  </button>
-                </div>
-                {players.length === 0 ? (
-                  <p className="rounded-xl border border-dashed border-zinc-200 px-4 py-10 text-center text-sm text-zinc-500 dark:border-white/10">
-                    未检测到播放器。安装 mpv / VLC / PotPlayer 后重新检测，或通过 API 配置路径。
-                  </p>
-                ) : (
-                  <ul className="space-y-2">
-                    {players.map((player) => (
-                      <li
-                        key={player.path}
-                        className="flex items-center gap-3 rounded-xl border border-zinc-200 px-4 py-3 dark:border-white/10"
-                      >
-                        <SettingsIcon className="h-5 w-5 text-zinc-400" />
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                            {player.name}
-                          </div>
-                          <div className="truncate text-[11px] text-zinc-500">{player.path}</div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              <PlayerSettingsPanel
+                players={players}
+                onReloadPlayers={() => void loadPlayers()}
+                onNotice={setNotice}
+              />
             )}
 
             {tab === "sources" && (
@@ -453,14 +418,23 @@ export function SettingsModal({
                   <p className="text-xs text-zinc-500">
                     支持视频源与演员源；优先级越小越先执行。
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setEditor({ source: null })}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-400"
-                  >
-                    <PlusIcon className="h-3.5 w-3.5" />
-                    新增源
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void restoreSources()}
+                      className="rounded-md border border-zinc-200 px-2 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                    >
+                      恢复默认源
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditor({ source: null })}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-400"
+                    >
+                      <PlusIcon className="h-3.5 w-3.5" />
+                      新增源
+                    </button>
+                  </div>
                 </div>
                 {sources.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-zinc-200 px-4 py-12 text-center dark:border-white/10">
@@ -512,6 +486,7 @@ export function SettingsModal({
                               }`}
                             />
                           </button>
+                          {/* 内置源只允许启停，配置和删除入口禁用。 */}
                           <button
                             type="button"
                             onClick={() => setEditor({ source })}
@@ -540,6 +515,47 @@ export function SettingsModal({
         </div>
       </div>
 
+      {/* 删除目录：确认后清理记录，按选择决定是否删除磁盘文件。 */}
+      {deletingRoot && (
+        <RootDeleteModal
+          root={deletingRoot}
+          onClose={() => setDeletingRoot(null)}
+          onDeleted={(result) => {
+            setDeletingRoot(null);
+            void loadRoots();
+            onChanged();
+            if (result.failed_files.length > 0) {
+              setError(
+                `数据已删除，但有 ${result.failed_files.length} 个文件删除失败：${result.failed_files
+                  .map((file) => `${file.filename}（${file.message}）`)
+                  .join("；")}`,
+              );
+            } else if (result.deleted_files > 0) {
+              setNotice(
+                `已删除 ${result.deleted_videos} 部影片和 ${result.deleted_files} 个文件`,
+              );
+            } else {
+              setNotice(`已删除 ${result.deleted_videos} 部影片的数据`);
+            }
+          }}
+        />
+      )}
+
+      {/* 目录编辑保存后刷新列表并通知主界面，路径变更可能影响视频列表。 */}
+      {rootEditor && (
+        <RootSettingsModal
+          root={rootEditor}
+          onClose={() => setRootEditor(null)}
+          onSaved={(message) => {
+            setRootEditor(null);
+            void loadRoots();
+            onChanged();
+            setNotice(message);
+          }}
+        />
+      )}
+
+      {/* source 为 null 表示新增；保存后关闭编辑器并重新拉取源列表。 */}
       {editor && (
         <SourceForm
           source={editor.source}

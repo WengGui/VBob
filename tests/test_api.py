@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -90,3 +91,30 @@ def test_error_envelope_for_missing_video(client: TestClient) -> None:
     response = client.get("/api/videos/999")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
+
+
+def test_player_setting_roundtrip(client: TestClient) -> None:
+    # 使用当前解释器作为“可执行文件”，避免依赖系统是否安装播放器。
+    player = {"name": "custom", "path": sys.executable, "args": []}
+    response = client.put("/api/settings", json={"playback": {"player": player}})
+    assert response.status_code == 200, response.text
+    saved = response.json()["playback"]["player"]
+    assert saved["name"] == "custom"
+    assert Path(saved["path"]).is_file()
+
+    response = client.put("/api/settings", json={"playback": {"player": None}})
+    assert response.status_code == 200
+    assert response.json()["playback"]["player"] is None
+
+
+def test_player_setting_rejects_missing_executable(client: TestClient) -> None:
+    response = client.put(
+        "/api/settings",
+        json={
+            "playback": {
+                "player": {"name": "x", "path": "/definitely/missing/player", "args": []}
+            }
+        },
+    )
+    assert response.status_code == 422
+    assert "播放器不存在" in response.json()["error"]["message"]

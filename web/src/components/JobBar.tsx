@@ -1,6 +1,11 @@
+/**
+ * 后台任务进度条。
+ * 统一展示扫描/刮削任务的状态、完成数和消息；活动任务可取消，结束后可关闭。
+ */
 import type { Job } from "../api";
 import { ScanIcon } from "./Icons";
 
+/** 状态文案根据任务类型复用“扫描/刮削”动词，避免为每种任务单独分支。 */
 function labelOf(job: Job): string {
   const verb = job.type.startsWith("scrape") ? "刮削" : "扫描";
   if (job.status === "queued") return "排队中";
@@ -18,6 +23,7 @@ const COLORS: Record<Job["status"], string> = {
   canceled: "text-zinc-500 dark:text-zinc-400",
 };
 
+/** 任务条；job 提供状态与进度，onCancel/onDismiss 分别处理取消和关闭。 */
 export function JobBar({
   job,
   onCancel,
@@ -28,6 +34,7 @@ export function JobBar({
   onDismiss: () => void;
 }) {
   const active = job.status === "queued" || job.status === "running";
+  // total 尚未确定时返回 null，界面改用不定长动画，避免显示 0%。
   const percent = job.total > 0 ? Math.min(100, Math.round((job.done / job.total) * 100)) : null;
 
   return (

@@ -1,8 +1,14 @@
+/**
+ * 后端 API 的类型定义与统一请求封装。
+ * 所有接口都经过 request()，由它补充请求头并把非 2xx 响应转换为 ApiError；
+ * 各业务方法只负责前端参数到后端查询键/请求体的映射。
+ */
 export interface ActressBrief {
   id: number;
   name: string;
 }
 
+/** 列表和详情共用的元数据摘要，不包含仅在详情接口返回的字段。 */
 export interface MetadataSummary {
   title: string | null;
   original_title: string | null;
@@ -17,6 +23,7 @@ export interface MetadataSummary {
   tags: string[];
   actresses: string[];
   studio: string | null;
+  series: string | null;
   release_date: string | null;
   runtime_sec: number | null;
   censored: string | null;
@@ -41,13 +48,26 @@ export interface Video {
   created_at: string;
   updated_at: string;
   metadata: MetadataSummary | null;
+  /** 分组内仍存在的文件数；1 表示普通单文件影片。 */
+  file_count?: number;
 }
 
+/** 同一部影片下的实际播放文件（A/B 分段、不同清晰度等）。 */
+export interface VideoFile {
+  id: number;
+  path: string;
+  filename: string;
+  size_bytes: number | null;
+  duration_sec: number | null;
+  present: boolean;
+  missing_since: string | null;
+}
+
+/** 详情接口返回的完整元数据，额外包含简介、手动字段和版本号。 */
 export interface FullMetadata extends MetadataSummary {
   id: number;
   video_id: number;
   overview: string | null;
-  series: string | null;
   director: string | null;
   matched_by: string | null;
   manual_fields: string[];
@@ -58,6 +78,23 @@ export interface VideoDetail {
   video: Omit<Video, "metadata" | "actresses">;
   metadata: FullMetadata | null;
   actresses: ActressBrief[];
+  /** 按“存在优先、添加顺序”返回该影片的所有文件。 */
+  files: VideoFile[];
+}
+
+/** 删除扫描目录的返回结果。 */
+export interface DeleteScanRootResult {
+  deleted_videos: number;
+  deleted_files: number;
+  failed_files: Array<{ filename: string; message: string }>;
+}
+
+/** 彻底删除文件的返回结果；部分失败时 failed_files 给出原因。 */
+export interface DeleteVideoFilesResult {
+  deleted_files: number;
+  failed_files: Array<{ id: number; filename: string; message: string }>;
+  remaining_files: number;
+  record_deleted: boolean;
 }
 
 export interface Actress {
@@ -85,6 +122,7 @@ export interface Actress {
   video_count?: number;
 }
 
+// 演员作品概要来自联表查询，SQLite 的 0/1 可能直接透出，因此布尔字段兼容 number。
 export interface ActressVideo {
   id: number;
   filename: string;
@@ -111,12 +149,15 @@ export interface ScanRoot {
   enabled: boolean;
   scan_interval_minutes: number;
   scanned_count?: number;
+  /** 目录内的实际文件数（同一部影片可能有多个文件）。 */
+  file_count?: number;
   scraped_count?: number;
   last_scan_at: string | null;
   last_scan_started_at: string | null;
   last_scan_finished_at: string | null;
   last_scan_status: string | null;
   last_scan_duration_ms: number | null;
+  // 设置页直接读取目录内嵌的活动任务，避免为每个目录单独轮询任务接口。
   active_job: {
     id: string;
     type: string;
@@ -150,6 +191,19 @@ export interface PlayerInfo {
   source: string;
 }
 
+/** 设置中保存的播放器；args 为参数模板，支持 {path} / {seek}。 */
+export interface PlayerConfig {
+  name: string;
+  path: string;
+  args: string[];
+}
+
+/** 设置接口返回的完整结构，本模块只关心 playback.player。 */
+export interface AppSettings {
+  playback: { player: PlayerConfig | null };
+  [key: string]: unknown;
+}
+
 export interface Source {
   id: number;
   name: string;
@@ -163,6 +217,7 @@ export interface Source {
   updated_at: string;
 }
 
+/** 统一的后端错误类型，保留业务错误码和 HTTP 状态，供界面区分处理。 */
 export class ApiError extends Error {
   code: string;
   status: number;
@@ -174,6 +229,11 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 通用 JSON 请求封装。
+ * 仅对非 FormData 请求自动设置 Content-Type；上传文件时交给浏览器生成 multipart 边界。
+ * 错误响应优先读取后端约定的 { error: { message, code } }，解析失败则退回状态文本。
+ */
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const isForm = init?.body instanceof FormData;
   const response = await fetch(url, {
@@ -195,12 +255,14 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(message, code, response.status);
   }
+  // 删除等无内容接口返回 204，不能继续调用 response.json()。
   if (response.status === 204) {
     return undefined as T;
   }
   return (await response.json()) as T;
 }
 
+/** 后端接口集合；组件通过这里发起请求，不直接拼 URL。 */
 export const api = {
   listVideos(params: {
     page?: number;
@@ -211,7 +273,13 @@ export const api = {
     favorite?: boolean;
     actressId?: number;
     tag?: string;
+    series?: string;
+    /** true 只看刮削成功，false 只看未成功（no_match/failed/未尝试）。 */
+    scraped?: boolean;
+    /** sort=random 时的随机种子；相同种子翻页顺序稳定。 */
+    seed?: number;
   }): Promise<{ items: Video[]; total: number; page: number; page_size: number }> {
+    // 前端使用 camelCase 参数，这里转换成后端约定的 snake_case 查询键。
     const search = new URLSearchParams();
     search.set("page", String(params.page ?? 1));
     search.set("page_size", String(params.pageSize ?? 60));
@@ -221,6 +289,9 @@ export const api = {
     if (params.favorite !== undefined) search.set("favorite", String(params.favorite));
     if (params.actressId !== undefined) search.set("actress_id", String(params.actressId));
     if (params.tag) search.set("tag", params.tag);
+    if (params.series) search.set("series", params.series);
+    if (params.scraped !== undefined) search.set("scraped", String(params.scraped));
+    if (params.seed !== undefined) search.set("seed", String(params.seed));
     return request(`/api/videos?${search.toString()}`);
   },
 
@@ -249,6 +320,23 @@ export const api = {
     return request(`/api/videos/${id}`, { method: "DELETE" });
   },
 
+  /** 把源视频合并到目标视频，返回合并后的目标详情。 */
+  mergeVideos(id: number, sourceIds: number[]): Promise<VideoDetail> {
+    return request(`/api/videos/${id}/merge`, {
+      method: "POST",
+      body: JSON.stringify({ source_ids: sourceIds }),
+    });
+  },
+
+  /** 彻底删除分组中的指定文件；全部删除后后端会同时移除记录。 */
+  deleteVideoFiles(id: number, fileIds: number[]): Promise<DeleteVideoFilesResult> {
+    return request(`/api/videos/${id}/delete-files`, {
+      method: "POST",
+      body: JSON.stringify({ file_ids: fileIds }),
+    });
+  },
+
+  // 封面上传使用 FormData，request() 会跳过 JSON Content-Type 以保留 multipart 边界。
   uploadVideoCover(id: number, file: File): Promise<VideoDetail> {
     const form = new FormData();
     form.append("file", file);
@@ -262,6 +350,8 @@ export const api = {
     });
   },
 
+  // 手动刮削默认 force=true 以允许重新抓取；overwrite_manual 默认关闭，
+  // 避免自动结果覆盖用户在编辑弹窗中填写的字段。
   scrapeVideo(
     id: number,
     force = true,
@@ -280,6 +370,7 @@ export const api = {
     });
   },
 
+  // 目录批量刮削默认只补缺失数据，避免整库重复抓取；手动触发单条时才强制刷新。
   scrapeRoot(rootId: number, force = false): Promise<{ job_id: string }> {
     return request("/api/scrapes", {
       method: "POST",
@@ -294,10 +385,13 @@ export const api = {
     return request(`/api/videos/${videoId}/scrape-logs?limit=${limit}`);
   },
 
-  playVideo(id: number): Promise<{ ok: boolean; player: string; pid: number }> {
+  playVideo(
+    id: number,
+    fileId?: number,
+  ): Promise<{ ok: boolean; player: string; pid: number }> {
     return request(`/api/videos/${id}/play`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(fileId === undefined ? {} : { file_id: fileId }),
     });
   },
 
@@ -309,6 +403,7 @@ export const api = {
     favorite?: boolean;
     sort?: string;
   }): Promise<{ items: Actress[]; total: number; page: number; page_size: number }> {
+    // 演员列表参数映射与视频列表一致，可选条件为空时不写入查询串。
     const search = new URLSearchParams();
     search.set("page", String(params.page ?? 1));
     search.set("page_size", String(params.pageSize ?? 60));
@@ -365,6 +460,22 @@ export const api = {
     return request("/api/players");
   },
 
+  /** 由后端弹出本机文件选择框；用户取消时 path 为 null。 */
+  pickPlayer(): Promise<{ path: string | null; name: string | null }> {
+    return request("/api/players/pick", { method: "POST" });
+  },
+
+  getSettings(): Promise<AppSettings> {
+    return request("/api/settings");
+  },
+
+  updateSettings(patch: Record<string, unknown>): Promise<AppSettings> {
+    return request("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    });
+  },
+
   listRoots(): Promise<{ items: ScanRoot[] }> {
     return request("/api/scan-roots");
   },
@@ -390,6 +501,15 @@ export const api = {
     return request(`/api/scan-roots/${id}`, { method: "DELETE" });
   },
 
+  /** 删除目录及其影片数据；deleteFiles 为 true 时同时删除磁盘文件。 */
+  deleteRootData(id: number, deleteFiles: boolean): Promise<DeleteScanRootResult> {
+    return request(`/api/scan-roots/${id}/delete`, {
+      method: "POST",
+      body: JSON.stringify({ delete_files: deleteFiles }),
+    });
+  },
+
+  // 不传 rootId 时后端会扫描所有已启用的目录。
   createScan(rootId?: number): Promise<{ job_id: string }> {
     return request("/api/scans", {
       method: "POST",
@@ -407,6 +527,11 @@ export const api = {
 
   listSources(): Promise<{ items: Source[] }> {
     return request("/api/sources");
+  },
+
+  /** 补齐被删除的默认源；同名源保持用户现有配置。 */
+  restoreDefaultSources(): Promise<{ items: Source[] }> {
+    return request("/api/sources/restore-defaults", { method: "POST" });
   },
 
   createSource(config: Record<string, unknown>): Promise<Source> {

@@ -1,3 +1,9 @@
+"""扫描任务入口：把 Scanner 包装成 JobManager 的后台任务。
+
+run_scan 从设置读取扫描参数与清洗规则，构造 Scanner 执行扫描，
+最后用摘要更新进度；start_scan 只负责提交任务。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -16,8 +22,10 @@ def run_scan(
     cancel_event: Any,
     progress: Any,
 ) -> None:
+    """同步执行一次扫描，并上报最终统计。"""
     settings = store.get_settings()
     options = ScanOptions.from_settings(settings)
+    # 用户自定义清洗规则会与默认规则合并后用于特征提取。
     pipeline = FeaturePipeline(settings["scraping"]["clean_rules"])
     scanner = Scanner(
         store,
@@ -49,6 +57,7 @@ def start_scan(
     full: bool = False,
     root_id: int | None = None,
 ) -> str:
+    """创建扫描后台任务；root_id 仅用于任务按根目录筛选。"""
     def target(job_id: str, cancel_event: Any, progress: Any) -> None:
         run_scan(store, root_ids, full, job_id, cancel_event, progress)
 
