@@ -148,6 +148,15 @@ export function FolderIcon(props: IconProps) {
   );
 }
 
+/** 移出剧集（断开链接）图标。 */
+export function UnlinkIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9 15 7 17a3 3 0 0 1-4-4l3-3M15 9l2-2a3 3 0 0 1 4 4l-3 3M8 4v3M4 8h3M16 20v-3M20 16h-3" />
+    </Icon>
+  );
+}
+
 /** 关闭（叉号）图标。 */
 export function CloseIcon(props: IconProps) {
   return (

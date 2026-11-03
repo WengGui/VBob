@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +37,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 
 def default_data_dir() -> Path:
-    """返回默认数据目录 ``<当前工作目录>/data``。
+    """返回默认数据目录。
 
-    优先读取 ``VBOB_DATA_DIR``；命令行 ``--data-dir`` 在调用侧覆盖此默认值。
+    - 开发运行：``<当前工作目录>/data``；
+    - PyInstaller 打包：``<exe 所在目录>/data``，保证拷贝整个程序文件夹即可迁移；
+    - ``VBOB_DATA_DIR`` / ``--data-dir`` 始终优先。
     """
     env = os.environ.get("VBOB_DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return (Path(sys.executable).resolve().parent / "data").resolve()
     return (Path.cwd() / "data").resolve()
 
 

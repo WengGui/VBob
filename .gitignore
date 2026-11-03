@@ -9,3 +9,6 @@ web/dist/
 *.db
 *.db-wal
 *.db-shm
+build/
+dist/
+*.spec

@@ -320,6 +320,17 @@ export const api = {
     return request(`/api/videos/${id}`, { method: "DELETE" });
   },
 
+  /** 把文件移出剧集，各自拆分为独立视频。 */
+  detachVideoFiles(
+    id: number,
+    fileIds: number[],
+  ): Promise<{ detached: number[]; video: VideoDetail }> {
+    return request(`/api/videos/${id}/detach-files`, {
+      method: "POST",
+      body: JSON.stringify({ file_ids: fileIds }),
+    });
+  },
+
   /** 把源视频合并到目标视频，返回合并后的目标详情。 */
   mergeVideos(id: number, sourceIds: number[]): Promise<VideoDetail> {
     return request(`/api/videos/${id}/merge`, {

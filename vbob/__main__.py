@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -52,7 +53,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=8080, help="监听端口（默认 8080）")
     parser.add_argument("--data-dir", type=Path, default=None, help="数据目录")
-    parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    # 打包后的 exe 双击启动时默认打开浏览器；开发时仍显式传 --open。
+    frozen = bool(getattr(sys, "frozen", False))
+    parser.set_defaults(open=frozen)
+    parser.add_argument("--open", dest="open", action="store_true", help="启动后自动打开浏览器")
+    parser.add_argument("--no-open", dest="open", action="store_false", help="不自动打开浏览器")
     parser.add_argument("--version", action="version", version=f"vbob {__version__}")
     args = parser.parse_args(argv)
 

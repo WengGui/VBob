@@ -62,6 +62,24 @@ cd web && npm run dev   # http://127.0.0.1:5173，/api 自动代理到 8080
 uv run vbob             # 另一个终端
 ```
 
+### 3.1 打包 Windows 单文件版
+
+在项目根目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+```
+
+产物为 `dist\VBob.exe` 和 `dist\VBob-windows-x64.zip`。目标电脑不需要安装 Python、Node 或 uv：
+
+1. 解压 `VBob.exe` 到可写目录；
+2. 双击运行，程序会在 exe 同目录创建 `data\` 并自动打开浏览器；
+3. 关闭控制台窗口即停止服务；
+4. 迁移时把旧机器的 `data\` 复制到新机器的 exe 同目录；
+5. 升级时覆盖 exe，保留 `data\`，数据库会自动迁移。
+
+如果 8080 被占用，可使用 `VBob.exe --port 8081`；不希望自动打开浏览器可加 `--no-open`。exe 未签名，SmartScreen 提示时选择“更多信息 → 仍要运行”。
+
 ## 4. 首次使用
 
 1. 点击左下角「设置」，打开全局设置弹窗。
@@ -125,6 +143,7 @@ uv run vbob             # 另一个终端
 - 视频详情使用固定尺寸的居中弹窗，不再分标签页：封面与操作在左，基础信息、演员、标签、文件列表平铺在右；提取特征和刮削日志折叠在底部。
 - 详情中的演员、标签、系列都是可点击 tag，点击后关闭详情并在海报墙按该条件筛选。
 - 包含多个文件的影片在详情和海报墙中会显示文件数，点击播放会弹出文件选择框，缺失文件不可选。
+- 多文件影片的每个文件行都有「移出」按钮，可以把该文件拆成独立视频，用于撤销误合并；原视频至少保留一个文件。
 - 删除时可选择「删除记录」（保留磁盘文件）或「彻底删除」（删除勾选的文件）；多文件影片可只删除其中一部分，详情页的文件路径旁也提供删除入口。
 - 详情右上角的刮削图标可对单个视频重新刮削；会跳过“资料已完整”的检查并重新执行所有源，默认保留已填写的手动字段，只补全空字段。手动修正过的番号会直接作为刮削查询条件。
 - 编辑视频信息时只提交实际修改的字段，避免保存一次就把所有字段都标记为手动值。
@@ -318,6 +337,7 @@ PATCH  /api/videos/{id}/favorite        {favorite}
 POST   /api/videos/{id}/cover           上传封面
 PUT    /api/videos/{id}/cover           {url}
 POST   /api/videos/{id}/merge           {source_ids:[...]} 手动合并为剧集
+POST   /api/videos/{id}/detach-files    {file_ids:[...]} 文件移出剧集
 POST   /api/videos/{id}/delete-files    {file_ids:[...]} 彻底删除文件
 POST   /api/scan-roots/{id}/delete      {delete_files} 删除目录数据/文件
 POST   /api/sources/restore-defaults    补齐默认刮削源

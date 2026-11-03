@@ -601,6 +601,17 @@ export default function App() {
     setPage(1);
   }
 
+  // 把文件移出剧集，恢复为独立视频；用于撤销误合并。
+  async function detachVideoFile(videoId: number, fileId: number) {
+    try {
+      await api.detachVideoFiles(videoId, [fileId]);
+      setRefreshKey((key) => key + 1);
+      setNotice("已移出剧集，文件恢复为独立视频");
+    } catch (error) {
+      setBanner(errorMessage(error));
+    }
+  }
+
   // 把一个视频的文件合并到目标视频，两个海报变为一个剧集分组。
   async function mergeVideoGroups(targetId: number, sourceId: number) {
     if (targetId === sourceId) return;
@@ -976,6 +987,7 @@ export default function App() {
           onFilterTag={(tag) => applyVideoFilter({ tag })}
           onFilterSeries={(series) => applyVideoFilter({ series })}
           onDeleteFile={(fileId) => removeVideo(selectedVideoId, [fileId])}
+          onDetachFile={(fileId) => void detachVideoFile(selectedVideoId, fileId)}
           playing={playing}
         />
       )}

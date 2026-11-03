@@ -7,12 +7,17 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+if getattr(sys, "frozen", False):
+    # 打包后迁移 SQL 由 PyInstaller 放到 _MEIPASS/vbob/migrations。
+    MIGRATIONS_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "vbob" / "migrations"
+else:
+    MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 def utc_now() -> str:

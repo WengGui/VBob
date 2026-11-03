@@ -731,6 +731,109 @@ class Store:
             self._refresh_video_from_files(conn, target_id)
         return self.get_video(target_id)
 
+    def detach_video_files(
+        self, video_id: int, file_ids: Iterable[int]
+    ) -> dict[str, Any]:
+        """把分组中的文件拆成独立视频，用于撤销误合并。
+
+        每个文件会创建一条新的视频记录（无元数据），并标记
+        ``manual_separate``，避免下次启动时被自动剧集规则再次合并。
+        至少需要保留一个文件在原视频中。
+        """
+        ids = sorted({int(file_id) for file_id in file_ids})
+        if not ids:
+            raise InvalidError("请选择要移出剧集的文件")
+        placeholders = ",".join("?" for _ in ids)
+        new_ids: list[int] = []
+        now = utc_now()
+        pipeline = FeaturePipeline()
+        with self.db.transaction() as conn:
+            video = conn.execute(
+                "SELECT id, root_id FROM videos WHERE id=?", (video_id,)
+            ).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            total_files = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM video_files WHERE video_id=?", (video_id,)
+                ).fetchone()["n"]
+            )
+            files = conn.execute(
+                f"""
+                SELECT id, path, path_key, filename, size_bytes, mtime, duration_sec,
+                       present, missing_since
+                FROM video_files WHERE video_id=? AND id IN ({placeholders})
+                """,
+                [video_id, *ids],
+            ).fetchall()
+            if len(files) != len(ids):
+                raise InvalidError("存在不属于该视频的文件")
+            if len(files) >= total_files:
+                raise InvalidError("至少需要在原视频中保留一个文件")
+
+            root_path = None
+            if video["root_id"] is not None:
+                root = conn.execute(
+                    "SELECT path FROM scan_roots WHERE id=?", (int(video["root_id"]),)
+                ).fetchone()
+                root_path = str(root["path"]) if root else None
+
+            # 原视频的主 path_key 可能正好是要拆出去的文件，先让出唯一键。
+            conn.execute(
+                "UPDATE videos SET path_key=? WHERE id=?",
+                (f"__detach__{video_id}_{now}", video_id),
+            )
+            for file in files:
+                rel_path = str(file["filename"])
+                dirs: tuple[str, ...] = ()
+                if root_path:
+                    rel_path = os.path.relpath(str(file["path"]), root_path)
+                    parent = os.path.dirname(rel_path)
+                    dirs = tuple(reversed(parent.split(os.sep))) if parent else ()
+                try:
+                    features = pipeline.extract(
+                        FileRef(
+                            filename=str(file["filename"]),
+                            rel_path=rel_path,
+                            dirs=dirs,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - 提取失败也要允许移出
+                    log.exception("detach feature extraction failed for %s", file["filename"])
+                    features = {}
+                features["manual_separate"] = True
+                cur = conn.execute(
+                    """
+                    INSERT INTO videos(
+                        root_id, path, path_key, filename, size_bytes, mtime,
+                        duration_sec, features, present, missing_since,
+                        scan_status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scanned', ?, ?)
+                    """,
+                    (
+                        video["root_id"],
+                        file["path"],
+                        file["path_key"],
+                        file["filename"],
+                        file["size_bytes"],
+                        file["mtime"],
+                        file["duration_sec"],
+                        json.dumps(features, ensure_ascii=False),
+                        int(file["present"]),
+                        file["missing_since"],
+                        now,
+                        now,
+                    ),
+                )
+                new_id = int(cur.lastrowid)
+                conn.execute(
+                    "UPDATE video_files SET video_id=? WHERE id=?",
+                    (new_id, int(file["id"])),
+                )
+                new_ids.append(new_id)
+            self._refresh_video_from_files(conn, video_id)
+        return {"detached": new_ids, "video": self.get_video(video_id)}
+
     def backfill_episode_features(self) -> int:
         """为旧数据补充剧集识别特征，返回更新条数。
 
@@ -820,6 +923,7 @@ class Store:
                            AS is_complete
                 FROM videos v
                 WHERE v.root_id IS NOT NULL
+                  AND COALESCE(json_extract(v.features, '$.manual_separate'), 0) = 0
                   AND COALESCE(
                       json_extract(v.features, '$.jav_match_key'),
                       json_extract(v.features, '$.episode_key'),
@@ -964,10 +1068,21 @@ class Store:
                 old_key = old_features.get("jav_match_key") or old_features.get("episode_key")
                 new_key = features.get("jav_match_key") or features.get("episode_key")
                 if not old_key or old_key == new_key:
+                    # 重新提取特征时保留手动“移出剧集”标记，避免文件变化后
+                    # 下次启动又被自动规则并回剧集。
+                    updated_features = dict(features)
+                    if old_features.get("manual_separate"):
+                        updated_features["manual_separate"] = True
                     conn.execute(
                         "UPDATE videos SET root_id=?, features=?, scan_status=?, updated_at=? "
                         "WHERE id=?",
-                        (root_id, features_json, scan_status, now, video_id),
+                        (
+                            root_id,
+                            json.dumps(updated_features, ensure_ascii=False),
+                            scan_status,
+                            now,
+                            video_id,
+                        ),
                     )
                 else:
                     conn.execute(
@@ -984,10 +1099,12 @@ class Store:
                 group = conn.execute(
                     """
                     SELECT id FROM videos
-                    WHERE root_id=? AND COALESCE(
-                        json_extract(features, '$.jav_match_key'),
-                        json_extract(features, '$.episode_key')
-                    )=?
+                    WHERE root_id=?
+                      AND COALESCE(json_extract(features, '$.manual_separate'), 0) = 0
+                      AND COALESCE(
+                          json_extract(features, '$.jav_match_key'),
+                          json_extract(features, '$.episode_key')
+                      )=?
                     ORDER BY id ASC LIMIT 1
                     """,
                     (root_id, group_key),

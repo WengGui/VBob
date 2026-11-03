@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -60,6 +61,9 @@ def _web_dist() -> Path:
     env = os.environ.get("VBOB_WEB_DIST")
     if env:
         return Path(env).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        # PyInstaller onefile 会把 --add-data 内容解压到 _MEIPASS。
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "web" / "dist"
     return Path(__file__).resolve().parent.parent / "web" / "dist"
 
 

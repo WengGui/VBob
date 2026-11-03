@@ -53,6 +53,12 @@ class MergeVideosRequest(BaseModel):
     source_ids: list[int] = Field(min_length=1)
 
 
+class DetachVideoFilesRequest(BaseModel):
+    """要移出剧集、拆分为独立视频的文件 ID。"""
+
+    file_ids: list[int] = Field(min_length=1)
+
+
 class DeleteScanRootRequest(BaseModel):
     """删除扫描目录；delete_files=True 时同时删除已收录的磁盘文件。"""
 

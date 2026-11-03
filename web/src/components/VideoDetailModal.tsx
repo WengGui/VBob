@@ -23,6 +23,7 @@ import {
   PlayIcon,
   ScanIcon,
   TrashIcon,
+  UnlinkIcon,
 } from "./Icons";
 import { Modal } from "./Modal";
 
@@ -75,6 +76,7 @@ export function VideoDetailModal({
   onFilterTag,
   onFilterSeries,
   onDeleteFile,
+  onDetachFile,
   playing,
 }: {
   detail: VideoDetail | null;
@@ -90,6 +92,8 @@ export function VideoDetailModal({
   onFilterSeries: (series: string) => void;
   /** 删除指定文件；父组件会打开与“删除视频”相同的确认弹窗。 */
   onDeleteFile: (fileId: number) => void;
+  /** 把指定文件移出剧集，拆分为独立视频。 */
+  onDetachFile: (fileId: number) => void;
   playing: boolean;
 }) {
   const video = detail?.video;
@@ -375,6 +379,18 @@ export function VideoDetailModal({
                         >
                           {file.present ? "存在" : "缺失"}
                         </span>
+                        {files.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onDetachFile(file.id)}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-zinc-200 px-1.5 py-1 text-[10px] text-zinc-500 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 dark:border-white/10 dark:text-zinc-400 dark:hover:border-sky-500/30 dark:hover:bg-sky-500/10 dark:hover:text-sky-300"
+                            aria-label={`将 ${file.filename} 移出剧集`}
+                            title="移出剧集，拆分为独立视频"
+                          >
+                            <UnlinkIcon className="h-3 w-3" />
+                            移出
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => onDeleteFile(file.id)}

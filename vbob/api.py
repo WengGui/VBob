@@ -39,6 +39,7 @@ from .schemas import (
     CoverUrlUpdate,
     DeleteScanRootRequest,
     DeleteVideoFilesRequest,
+    DetachVideoFilesRequest,
     FavoriteUpdate,
     MergeVideosRequest,
     PlayRequest,
@@ -415,6 +416,14 @@ def delete_video(request: Request, video_id: int) -> Response:
     """删除视频记录（不删除磁盘文件），成功返回 204；不存在返回 404。"""
     _store(request).delete_video(video_id)
     return Response(status_code=204)
+
+
+@router.post("/videos/{video_id}/detach-files")
+def detach_video_files(
+    request: Request, video_id: int, body: DetachVideoFilesRequest
+) -> dict[str, Any]:
+    """把指定文件移出剧集，各自拆成独立视频；至少保留一个文件在原视频。"""
+    return _store(request).detach_video_files(video_id, body.file_ids)
 
 
 @router.post("/videos/{video_id}/merge")

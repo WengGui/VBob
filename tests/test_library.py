@@ -348,3 +348,77 @@ def test_scraped_filter(client: TestClient, tmp_path: Path) -> None:
     assert client.get("/api/videos", params={"scraped": "false"}).json()["total"] == 1
     assert client.get("/api/videos", params={"scraped": "true"}).json()["total"] == 1
     assert client.get("/api/videos", params={"scraped": "false"}).json()["items"][0]["id"] == unscraped_id
+
+
+def test_detach_file_from_group_and_prevent_auto_merge(
+    client: TestClient, tmp_path: Path
+) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "SSIS-001.mp4").write_bytes(b"a")
+    (media / "ABP-123.mp4").write_bytes(b"bb")
+    client.put("/api/settings", json={"scan": {"min_size_mb": 0}})
+    root = client.post("/api/scan-roots", json={"path": str(media)}).json()
+    scan(client, root["id"])
+    items = {item["filename"]: item for item in client.get("/api/videos").json()["items"]}
+    target_id = items["SSIS-001.mp4"]["id"]
+    source_id = items["ABP-123.mp4"]["id"]
+    client.post(f"/api/videos/{target_id}/merge", json={"source_ids": [source_id]})
+    merged = client.get(f"/api/videos/{target_id}").json()
+    file_id = next(
+        file["id"] for file in merged["files"] if file["filename"] == "ABP-123.mp4"
+    )
+
+    response = client.post(
+        f"/api/videos/{target_id}/detach-files", json={"file_ids": [file_id]}
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert len(payload["detached"]) == 1
+    assert len(payload["video"]["files"]) == 1
+    new_id = payload["detached"][0]
+    detached = client.get(f"/api/videos/{new_id}").json()
+    assert detached["video"]["features"]["manual_separate"] is True
+    assert detached["metadata"] is None
+    assert [file["filename"] for file in detached["files"]] == ["ABP-123.mp4"]
+
+    # 启动时的自动合并不能把刚拆出去的文件重新并回剧集。
+    assert client.app.state.store.merge_duplicate_videos() == 0
+    assert client.get("/api/videos").json()["total"] == 2
+
+
+def test_detached_episode_is_not_auto_regrouped_after_rescan(
+    client: TestClient, tmp_path: Path
+) -> None:
+    media = tmp_path / "media"
+    show = media / "Show"
+    show.mkdir(parents=True)
+    first = show / "Show1.mp4"
+    second = show / "Show2.mp4"
+    first.write_bytes(b"a")
+    second.write_bytes(b"bb")
+    client.put("/api/settings", json={"scan": {"min_size_mb": 0}})
+    root = client.post("/api/scan-roots", json={"path": str(media)}).json()
+    scan(client, root["id"])
+    group = client.get("/api/videos").json()["items"][0]
+    assert group["file_count"] == 2
+    file_id = next(
+        file["id"] for file in client.get(f"/api/videos/{group['id']}").json()["files"]
+    )
+
+    payload = client.post(
+        f"/api/videos/{group['id']}/detach-files", json={"file_ids": [file_id]}
+    ).json()
+    new_id = payload["detached"][0]
+    assert len(payload["video"]["files"]) == 1
+    # 两个分组现在拥有相同的剧集键，但手动拆分标记会阻止启动时自动合并。
+    assert client.app.state.store.merge_duplicate_videos() == 0
+
+    # 文件变化触发重新提取特征后，标记仍应保留。
+    target = first if payload["video"]["files"][0]["filename"] == second.name else second
+    target.write_bytes(b"changed content")
+    scan(client, root["id"])
+    detached = client.get(f"/api/videos/{new_id}").json()
+    assert detached["video"]["features"]["manual_separate"] is True
+    assert client.app.state.store.merge_duplicate_videos() == 0
+    assert client.get("/api/videos").json()["total"] == 2

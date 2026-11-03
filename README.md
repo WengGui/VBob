@@ -42,6 +42,37 @@ set VBOB_DATA_DIR=D:\VBobData    # Windows；bash 用 export
 - API 文档：<http://127.0.0.1:8080/docs>
 - 健康检查：<http://127.0.0.1:8080/api/health>
 
+## 打包为 Windows 可执行文件
+
+需要构建机安装 Python/uv 和 Node.js；目标机器不需要 Python、Node 或 uv。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+```
+
+产物：
+
+- `dist\VBob.exe`：单文件程序（约 25MB）；
+- `dist\VBob-windows-x64.zip`：分发包。
+
+使用方式：把 exe 解压到任意**可写目录**（例如 `D:\VBob` 或桌面），双击 `VBob.exe`。
+
+- 首次运行会在 exe 同目录创建 `data\`，保存数据库、封面和日志，并自动打开浏览器；
+- 默认写入两个可编辑的刮削源；
+- 控制台窗口需要保持打开，关闭窗口即停止服务；
+- 迁移数据：把旧机器的 `data\` 整个复制到新机器的 exe 同目录即可；
+- 升级：覆盖 exe，保留 `data\`，数据库迁移会自动执行。
+
+常用参数：
+
+```text
+VBob.exe --port 8081       # 换端口
+VBob.exe --no-open         # 不自动打开浏览器
+VBob.exe --data-dir D:\VBobData
+```
+
+exe 未签名，Windows SmartScreen 可能提示；选择“更多信息 → 仍要运行”。不要把 exe 放在 `Program Files` 等无写权限目录。
+
 ## 测试
 
 ```bash
@@ -71,7 +102,7 @@ uv run pytest
 - 视频/演员海报墙，展示必填信息与完整度；收藏按钮
 - 视频详情弹窗（固定尺寸平铺布局）与演员详情抽屉、字段级编辑、封面上传/URL、单视频重新刮削；手动修正番号会用于后续刮削
 - 同番号多文件、剧集文件自动合并为一部影片，播放时选择具体文件；纯集数文件名使用文件夹名作为标题
-- 海报墙支持拖动合并剧集，编辑弹窗也可手动归入其他剧集
+- 海报墙支持拖动合并剧集，编辑弹窗也可手动归入其他剧集；详情页可把文件移出剧集撤销误合并
 - 海报墙可一键筛选「待补全」和「未刮削」视频
 - 删除支持“仅删记录”或“彻底删除文件”，多文件可勾选删除
 - 海报墙随机排序、演员/标签/系列点击筛选、可折叠标签行
