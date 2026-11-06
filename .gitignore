@@ -1,14 +1,43 @@
+# Python
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
 .pytest_cache/
 .uv/
-data/
+.coverage
+.coverage.*
+htmlcov/
+
+# 前端
 web/node_modules/
 web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# 本地数据与运行时产物
+data/
+logs/
+*.log
 *.db
 *.db-wal
 *.db-shm
+*.bak
+.env
+.env.*
+!.env.example
+
+# 构建产物
 build/
 dist/
 *.spec
+/VBob.exe
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

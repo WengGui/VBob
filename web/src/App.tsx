@@ -648,9 +648,11 @@ export default function App() {
       {/* 左侧固定导航：收藏分组可折叠，主题切换和设置固定在底部。 */}
       <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col border-r border-zinc-200 bg-white px-2 py-4 lg:w-60 lg:px-3 dark:border-white/10 dark:bg-zinc-900/70">
         <div className="flex items-center gap-2 px-1.5 py-1">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-500 text-sm font-black text-white shadow-md shadow-sky-500/20">
-            V
-          </div>
+          <img
+            src="/icon-192.png"
+            alt="VBob"
+            className="h-9 w-9 shrink-0 rounded-xl shadow-md shadow-sky-500/20"
+          />
           <div className="hidden min-w-0 lg:block">
             <div className="truncate text-sm font-semibold tracking-wide">VBob</div>
             <div className="text-[10px] text-zinc-500">本地视频库</div>

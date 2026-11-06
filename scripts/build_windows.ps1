@@ -35,6 +35,7 @@ uv run pyinstaller `
     --onefile `
     --console `
     --name VBob `
+    --icon "assets\vbob.ico" `
     --add-data "web/dist;web/dist" `
     --add-data "vbob/migrations;vbob/migrations" `
     --collect-submodules uvicorn `
