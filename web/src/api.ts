@@ -18,6 +18,8 @@ export interface MetadataSummary {
   cover_local: string | null;
   scrape_status: string | null;
   source_name: string | null;
+  /** 本次成功贡献数据的源，按执行顺序排列。 */
+  source_names: string[];
   last_scraped_at: string | null;
   genres: string[];
   tags: string[];
@@ -35,6 +37,8 @@ export interface Video {
   id: number;
   path: string;
   filename: string;
+  /** 媒体类型：movie / anime / series / jav / other。 */
+  category: string;
   size_bytes: number | null;
   mtime: number | null;
   duration_sec: number | null;
@@ -71,6 +75,8 @@ export interface FullMetadata extends MetadataSummary {
   director: string | null;
   matched_by: string | null;
   manual_fields: string[];
+  /** 用户记住的偏好源；null 表示跟随目录/分类配置。 */
+  source_id: number | null;
   version: number;
 }
 
@@ -148,6 +154,10 @@ export interface ScanRoot {
   path_key: string;
   enabled: boolean;
   scan_interval_minutes: number;
+  /** 目录的媒体类型，视频默认继承它。 */
+  category: string;
+  /** 目录限定的源 ID，按执行顺序保存；空数组表示使用该分类下全部启用源。 */
+  source_ids: number[];
   scanned_count?: number;
   /** 目录内的实际文件数（同一部影片可能有多个文件）。 */
   file_count?: number;
@@ -209,12 +219,35 @@ export interface Source {
   name: string;
   enabled: boolean;
   priority: number;
+  /** 媒体类型，与 config.category 一致。 */
+  category: string;
   version: number;
   builtin: boolean;
   config: Record<string, unknown>;
   last_test_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 内置源模板：TMDB 需要用户自行填写 API 密钥，Shikimori 无需配置。 */
+export interface SourceTemplate {
+  key: string;
+  name: string;
+  description: string;
+  config: Record<string, unknown>;
+}
+
+/** 媒体类型的中文标签，顺序与左侧导航一致。 */
+export const CATEGORY_LABELS: Array<{ value: string; label: string }> = [
+  { value: "movie", label: "电影" },
+  { value: "anime", label: "动漫" },
+  { value: "series", label: "剧集" },
+  { value: "jav", label: "JAV" },
+  { value: "other", label: "其他" },
+];
+
+export function categoryLabel(value: string | null | undefined): string {
+  return CATEGORY_LABELS.find((item) => item.value === value)?.label ?? "其他";
 }
 
 /** 统一的后端错误类型，保留业务错误码和 HTTP 状态，供界面区分处理。 */
@@ -276,6 +309,8 @@ export const api = {
     series?: string;
     /** true 只看刮削成功，false 只看未成功（no_match/failed/未尝试）。 */
     scraped?: boolean;
+    /** 媒体类型过滤；不传表示全部。 */
+    category?: string;
     /** sort=random 时的随机种子；相同种子翻页顺序稳定。 */
     seed?: number;
   }): Promise<{ items: Video[]; total: number; page: number; page_size: number }> {
@@ -291,8 +326,22 @@ export const api = {
     if (params.tag) search.set("tag", params.tag);
     if (params.series) search.set("series", params.series);
     if (params.scraped !== undefined) search.set("scraped", String(params.scraped));
+    if (params.category) search.set("category", params.category);
     if (params.seed !== undefined) search.set("seed", String(params.seed));
     return request(`/api/videos?${search.toString()}`);
+  },
+
+  /** 各媒体类型的视频数量，用于左侧导航角标。 */
+  listVideoCategories(): Promise<Record<string, number>> {
+    return request("/api/videos/categories");
+  },
+
+  /** 手动修改视频分类；修改后不再随目录分类变化。 */
+  setVideoCategory(id: number, category: string): Promise<VideoDetail> {
+    return request(`/api/videos/${id}/category`, {
+      method: "PUT",
+      body: JSON.stringify({ category }),
+    });
   },
 
   getVideo(id: number): Promise<VideoDetail> {
@@ -367,10 +416,23 @@ export const api = {
     id: number,
     force = true,
     overwriteManual = false,
+    options: {
+      /** 指定源；配合 rememberSource 写入视频偏好。 */
+      sourceId?: number | null;
+      rememberSource?: boolean;
+      /** 切换源时先清空非手动字段。 */
+      reset?: boolean;
+    } = {},
   ): Promise<{ job_id: string }> {
     return request(`/api/videos/${id}/scrape`, {
       method: "POST",
-      body: JSON.stringify({ force, overwrite_manual: overwriteManual }),
+      body: JSON.stringify({
+        force,
+        overwrite_manual: overwriteManual,
+        source_id: options.sourceId ?? null,
+        remember_source: options.rememberSource ?? false,
+        reset: options.reset ?? false,
+      }),
     });
   },
 
@@ -491,16 +553,32 @@ export const api = {
     return request("/api/scan-roots");
   },
 
-  createRoot(path: string, scanIntervalMinutes = 0): Promise<ScanRoot> {
+  createRoot(
+    path: string,
+    scanIntervalMinutes = 0,
+    category = "other",
+    sourceIds: number[] = [],
+  ): Promise<ScanRoot> {
     return request("/api/scan-roots", {
       method: "POST",
-      body: JSON.stringify({ path, scan_interval_minutes: scanIntervalMinutes }),
+      body: JSON.stringify({
+        path,
+        scan_interval_minutes: scanIntervalMinutes,
+        category,
+        source_ids: sourceIds,
+      }),
     });
   },
 
   updateRoot(
     id: number,
-    patch: { path?: string; scan_interval_minutes?: number; enabled?: boolean },
+    patch: {
+      path?: string;
+      scan_interval_minutes?: number;
+      enabled?: boolean;
+      category?: string;
+      source_ids?: number[];
+    },
   ): Promise<ScanRoot> {
     return request(`/api/scan-roots/${id}`, {
       method: "PUT",
@@ -571,5 +649,15 @@ export const api = {
 
   deleteSource(id: number): Promise<void> {
     return request(`/api/sources/${id}`, { method: "DELETE" });
+  },
+
+  listSourceTemplates(): Promise<{ items: SourceTemplate[] }> {
+    return request("/api/sources/templates");
+  },
+
+  createSourceFromTemplate(key: string): Promise<Source> {
+    return request(`/api/sources/templates/${encodeURIComponent(key)}`, {
+      method: "POST",
+    });
   },
 };

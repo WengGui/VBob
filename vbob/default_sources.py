@@ -14,6 +14,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "enabled": True,
         "priority": 1,
         "type": "feature",
+        "category": "jav",
         "feature": "jav_code",
         "request": {
             "url": "https://www.busfan.cyou/{jav_code}",
@@ -51,6 +52,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "enabled": True,
         "priority": 20,
         "type": "actress",
+        "category": "jav",
         "request": {
             "url": "{actress_url}",
             "method": "GET",

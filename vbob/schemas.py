@@ -9,6 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# 媒体类型：与 vbob.categories 保持一致。
+Category = Literal["movie", "anime", "series", "jav", "other"]
+
 
 class ScanRootCreate(BaseModel):
     """新建扫描目录。"""
@@ -16,6 +19,9 @@ class ScanRootCreate(BaseModel):
     path: str = Field(min_length=1)
     enabled: bool = True
     scan_interval_minutes: int = Field(default=0, ge=0, le=10080)
+    category: Category = "other"
+    # 目录限定的源，按勾选顺序执行；空数组表示该分类下全部启用源。
+    source_ids: list[int] = Field(default_factory=list)
 
 
 class ScanRootUpdate(BaseModel):
@@ -24,6 +30,8 @@ class ScanRootUpdate(BaseModel):
     enabled: bool | None = None
     path: str | None = None
     scan_interval_minutes: int | None = Field(default=None, ge=0, le=10080)
+    category: Category | None = None
+    source_ids: list[int] | None = None
 
 
 class ScanRequest(BaseModel):
@@ -70,6 +78,12 @@ class ScrapeRequest(BaseModel):
 
     force: bool = False
     overwrite_manual: bool = False
+    # 指定源时只用该源；remember_source 为真才写入视频偏好。
+    # 因此 remember_source=true + source_id=null 表示恢复为“跟随目录/分类”。
+    source_id: int | None = None
+    remember_source: bool = False
+    # 先清空非手动字段再刮，适用于切换源后完整重写资料。
+    reset: bool = False
 
 
 class BatchScrapeRequest(ScrapeRequest):
@@ -111,6 +125,12 @@ class VideoMetadataUpdate(BaseModel):
     censored: Literal["censored", "uncensored", "unknown"] | None = None
     country: str | None = None
     actresses: list[ActressRef] | None = None
+
+
+class VideoCategoryUpdate(BaseModel):
+    """手动修改视频分类；修改后不再随目录分类变化。"""
+
+    category: Category
 
 
 class ActressCreate(BaseModel):

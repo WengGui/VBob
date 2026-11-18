@@ -5,7 +5,15 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { api, type PlayerInfo, type ScanRoot, type Source } from "../api";
+import {
+  api,
+  CATEGORY_LABELS,
+  categoryLabel,
+  type PlayerInfo,
+  type ScanRoot,
+  type Source,
+  type SourceTemplate,
+} from "../api";
 import { errorMessage, formatDate, formatDuration } from "../format";
 import {
   CloseIcon,
@@ -55,8 +63,11 @@ export function SettingsModal({
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
+  // 内置源模板（TMDB / Shikimori），一键创建后再由用户补全密钥。
+  const [templates, setTemplates] = useState<SourceTemplate[]>([]);
   const [newRoot, setNewRoot] = useState("");
   const [newInterval, setNewInterval] = useState("0");
+  const [newCategory, setNewCategory] = useState("other");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ source: Source | null } | null>(null);
@@ -89,12 +100,21 @@ export function SettingsModal({
     }
   }, []);
 
+  const loadTemplates = useCallback(async () => {
+    try {
+      setTemplates((await api.listSourceTemplates()).items);
+    } catch (loadError) {
+      setError(errorMessage(loadError));
+    }
+  }, []);
+
   // 首次打开或外部数据变化（refreshKey）时并行加载三类设置数据。
   useEffect(() => {
     void loadRoots();
     void loadSources();
     void loadPlayers();
-  }, [loadRoots, loadSources, loadPlayers, refreshKey]);
+    void loadTemplates();
+  }, [loadRoots, loadSources, loadPlayers, loadTemplates, refreshKey]);
 
   // 扫描进行中每秒刷新目录，及时更新内嵌 active_job 的 done/total 进度。
   useEffect(() => {
@@ -126,11 +146,22 @@ export function SettingsModal({
     const path = newRoot.trim();
     if (!path) return;
     try {
-      await api.createRoot(path, Number(newInterval) || 0);
+      await api.createRoot(path, Number(newInterval) || 0, newCategory);
       setNewRoot("");
       setNewInterval("0");
       await loadRoots();
       setNotice("扫描目录已添加");
+    } catch (addError) {
+      setError(errorMessage(addError));
+    }
+  }
+
+  // 按模板创建源；TMDB 模板创建后仍需在编辑弹窗里填写 API 密钥。
+  async function addTemplate(template: SourceTemplate) {
+    try {
+      await api.createSourceFromTemplate(template.key);
+      await loadSources();
+      setNotice(`已添加「${template.name}」，如有需要请点「编辑」填写密钥`);
     } catch (addError) {
       setError(errorMessage(addError));
     }
@@ -293,6 +324,9 @@ export function SettingsModal({
                             <span className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
                               {root.path}
                             </span>
+                            <span className="rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:border-white/10">
+                              {categoryLabel(root.category)}
+                            </span>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-zinc-500">
                             <span>已收录 {root.scanned_count ?? 0} 部</span>
@@ -383,6 +417,18 @@ export function SettingsModal({
                     placeholder="D:\Media 或 /media/videos"
                     className="min-w-48 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
                   />
+                  <select
+                    value={newCategory}
+                    onChange={(event) => setNewCategory(event.target.value)}
+                    title="媒体类型"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
+                  >
+                    {CATEGORY_LABELS.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
                   <input
                     value={newInterval}
                     onChange={(event) => setNewInterval(event.target.value)}
@@ -436,6 +482,36 @@ export function SettingsModal({
                     </button>
                   </div>
                 </div>
+                {templates.length > 0 && (
+                  <div className="mb-4 rounded-xl border border-zinc-200 p-3 dark:border-white/10">
+                    <p className="mb-2 text-[11px] font-semibold text-zinc-500">
+                      从模板添加
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {templates.map((template) => {
+                        const exists = sources.some(
+                          (source) => source.name === template.name,
+                        );
+                        return (
+                          <button
+                            key={template.key}
+                            type="button"
+                            disabled={exists}
+                            title={template.description}
+                            onClick={() => void addTemplate(template)}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-1.5 text-[11px] text-zinc-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-40 disabled:hover:border-zinc-200 disabled:hover:bg-transparent dark:border-white/10 dark:text-zinc-300 dark:hover:border-sky-500/30 dark:hover:bg-sky-500/10 dark:hover:text-sky-300"
+                          >
+                            <PlusIcon className="h-3 w-3" />
+                            {exists ? `${template.name}（已添加）` : template.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-2 text-[10px] text-zinc-400">
+                      TMDB 需要在「编辑」里填写 API 密钥；Shikimori 无需配置。
+                    </p>
+                  </div>
+                )}
                 {sources.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-zinc-200 px-4 py-12 text-center dark:border-white/10">
                     <DatabaseIcon className="mx-auto h-8 w-8 text-zinc-300 dark:text-zinc-700" />
@@ -449,6 +525,9 @@ export function SettingsModal({
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
                               {source.name}
+                            </span>
+                            <span className="rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:border-white/10">
+                              {categoryLabel(source.category)}
                             </span>
                             <span className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300">
                               {typeLabel(source)}

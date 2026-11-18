@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
+from .categories import normalize_category
 from .errors import InvalidError
 
 # feature：按文件名特征拼接 URL；query：按标题搜索；actress：演员资料。
@@ -23,6 +24,42 @@ def _non_empty_str(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidError(f"{field} 必须是非空字符串")
     return value.strip()
+
+
+def _validate_extract(extract: Any, path: str) -> None:
+    """校验提取表达式对象；``path`` 仅用于错误信息（extract 或 detail.extract）。"""
+    if not isinstance(extract, dict) or not extract:
+        raise InvalidError(f"{path} 必须是非空对象")
+    for field, expression in extract.items():
+        if not isinstance(field, str) or not field.strip():
+            raise InvalidError(f"{path} 的字段名必须是非空字符串")
+        if isinstance(expression, dict):
+            # 只有 actresses 支持结构化对象；其余字段必须是表达式字符串。
+            if field != "actresses":
+                raise InvalidError(f"{path}.{field} 必须是非空字符串")
+            unknown = set(expression) - {"selector", "name", "url"}
+            if unknown:
+                raise InvalidError(f"{path}.actresses 含有未知字段: {', '.join(sorted(unknown))}")
+            selector = expression.get("selector")
+            if not isinstance(selector, str) or not selector.strip():
+                raise InvalidError(f"{path}.actresses.selector 必须是非空字符串")
+            prefix = selector.strip().split(":", 1)[0].strip().lower()
+            if prefix not in EXTRACT_PREFIXES:
+                raise InvalidError(
+                    f"{path}.actresses.selector 需要以 css: / xpath: / json: / regex: 开头"
+                )
+            for key in ("name", "url"):
+                value = expression.get(key)
+                if value is not None and not isinstance(value, str):
+                    raise InvalidError(f"{path}.actresses.{key} 必须是字符串")
+            continue
+        if not isinstance(expression, str) or not expression.strip():
+            raise InvalidError(f"{path}.{field} 必须是非空字符串")
+        prefix = expression.strip().split(":", 1)[0].strip().lower()
+        if prefix not in EXTRACT_PREFIXES:
+            raise InvalidError(
+                f"{path}.{field} 需要以 css: / xpath: / json: / regex: 开头"
+            )
 
 
 def validate_source_config(config: Any) -> dict[str, Any]:
@@ -44,6 +81,9 @@ def validate_source_config(config: Any) -> dict[str, Any]:
         raise InvalidError("type 必须是 feature、query 或 actress")
     if source_type == "feature":
         data["feature"] = _non_empty_str(data.get("feature"), "feature")
+
+    # category 是媒体类型（电影/动漫/…），与抓取方式 type 相互独立。
+    data["category"] = normalize_category(data.get("category"), "category")
 
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -71,38 +111,44 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     request["method"] = method
 
     extract = data.get("extract")
-    if not isinstance(extract, dict) or not extract:
-        raise InvalidError("extract 必须是非空对象")
-    for field, expression in extract.items():
-        if not isinstance(field, str) or not field.strip():
-            raise InvalidError("extract 的字段名必须是非空字符串")
-        if isinstance(expression, dict):
-            # 只有 actresses 支持结构化对象；其余字段必须是表达式字符串。
-            if field != "actresses":
-                raise InvalidError(f"extract.{field} 必须是非空字符串")
-            unknown = set(expression) - {"selector", "name", "url"}
-            if unknown:
-                raise InvalidError(f"extract.actresses 含有未知字段: {', '.join(sorted(unknown))}")
-            selector = expression.get("selector")
-            if not isinstance(selector, str) or not selector.strip():
-                raise InvalidError("extract.actresses.selector 必须是非空字符串")
-            prefix = selector.strip().split(":", 1)[0].strip().lower()
-            if prefix not in EXTRACT_PREFIXES:
-                raise InvalidError(
-                    "extract.actresses.selector 需要以 css: / xpath: / json: / regex: 开头"
-                )
-            for key in ("name", "url"):
-                value = expression.get(key)
-                if value is not None and not isinstance(value, str):
-                    raise InvalidError(f"extract.actresses.{key} 必须是字符串")
-            continue
-        if not isinstance(expression, str) or not expression.strip():
-            raise InvalidError(f"extract.{field} 必须是非空字符串")
-        prefix = expression.strip().split(":", 1)[0].strip().lower()
-        if prefix not in EXTRACT_PREFIXES:
-            raise InvalidError(
-                f"extract.{field} 需要以 css: / xpath: / json: / regex: 开头"
-            )
+    _validate_extract(extract, "extract")
+
+    # vars 存放源级常量（如 API 密钥），作为 URL 占位符来源。
+    variables = data.get("vars", {})
+    if not isinstance(variables, dict):
+        raise InvalidError("vars 必须是对象")
+    for key, value in variables.items():
+        if not isinstance(key, str) or not key.strip():
+            raise InvalidError("vars 的键必须是非空字符串")
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            raise InvalidError(f"vars.{key} 必须是字符串或数字")
+    data["vars"] = variables
+
+    # 静态资源（封面）与页面/接口不同域时，用 asset_base_url 作为前缀。
+    asset_base = data.get("asset_base_url")
+    if asset_base is not None:
+        asset_base = _non_empty_str(asset_base, "asset_base_url")
+        parsed = urlsplit(asset_base)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise InvalidError("asset_base_url 必须是 http(s) URL")
+        data["asset_base_url"] = asset_base
+
+    # detail 是第二次请求：用第一次提取到的字段（如 tmdb id）查询详情接口。
+    detail = data.get("detail")
+    if detail is not None:
+        if not isinstance(detail, dict):
+            raise InvalidError("detail 必须是对象")
+        detail_url = _non_empty_str(detail.get("url"), "detail.url")
+        parsed = urlsplit(detail_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise InvalidError("detail.url 必须是 http(s) URL")
+        detail["url"] = detail_url
+        detail_method = str(detail.get("method", "GET")).upper()
+        if detail_method not in {"GET", "POST"}:
+            raise InvalidError("detail.method 只支持 GET/POST")
+        detail["method"] = detail_method
+        _validate_extract(detail.get("extract"), "detail.extract")
+        data["detail"] = detail
 
     # validators 目前只做结构校验，具体规则由引擎消费。
     validators = data.get("validators", [])

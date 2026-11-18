@@ -48,8 +48,10 @@ from .schemas import (
     ScanRootUpdate,
     ScrapeRequest,
     SourceStateUpdate,
+    VideoCategoryUpdate,
     VideoMetadataUpdate,
 )
+from .source_templates import get_template, list_templates
 from .store import SORT_ORDERS, Store
 
 router = APIRouter(prefix="/api")
@@ -108,7 +110,11 @@ def create_root(request: Request, body: ScanRootCreate) -> dict[str, Any]:
     错误：路径不存在或不是目录 422；路径重复或与已有目录嵌套 409。
     """
     return _store(request).create_root(
-        body.path, body.enabled, body.scan_interval_minutes
+        body.path,
+        body.enabled,
+        body.scan_interval_minutes,
+        category=body.category,
+        source_ids=body.source_ids,
     )
 
 
@@ -124,6 +130,8 @@ def update_root(request: Request, root_id: int, body: ScanRootUpdate) -> dict[st
         enabled=body.enabled,
         path=body.path,
         scan_interval_minutes=body.scan_interval_minutes,
+        category=body.category,
+        source_ids=body.source_ids,
     )
 
 
@@ -253,6 +261,18 @@ def restore_default_sources(request: Request) -> dict[str, Any]:
     return {"items": _store(request).restore_default_sources()}
 
 
+@router.get("/sources/templates")
+def list_source_templates() -> dict[str, Any]:
+    """列出内置源模板（TMDB、Shikimori），供设置页一键创建。"""
+    return {"items": list_templates()}
+
+
+@router.post("/sources/templates/{key}", status_code=201)
+def create_source_from_template(request: Request, key: str) -> dict[str, Any]:
+    """按模板创建刮削源；同名源已存在时返回 409。"""
+    return _store(request).create_source(get_template(key)["config"])
+
+
 @router.post("/sources", status_code=201)
 def create_source(request: Request, config: dict[str, Any]) -> dict[str, Any]:
     """新建刮削源并返回 201。
@@ -314,6 +334,7 @@ def list_videos(
     series: str | None = None,
     censored: str | None = None,
     scraped: bool | None = None,
+    category: str | None = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """分页查询视频列表，返回 ``items``/``total``/``page``/``page_size``。
@@ -344,9 +365,16 @@ def list_videos(
         series=series,
         censored=censored,
         scraped=scraped,
+        category=category,
         seed=seed,
     )
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/videos/categories")
+def video_categories(request: Request) -> dict[str, Any]:
+    """各媒体类型的视频数量；``all`` 为合计，供左侧导航展示。"""
+    return _store(request).category_counts()
 
 
 @router.get("/videos/{video_id}")
@@ -374,6 +402,14 @@ def update_video_metadata(
     return _store(request).update_video_metadata(video_id, fields, version)
 
 
+@router.put("/videos/{video_id}/category")
+def set_video_category(
+    request: Request, video_id: int, body: VideoCategoryUpdate
+) -> dict[str, Any]:
+    """手动修改视频分类；之后目录分类变化不会再覆盖它。"""
+    return _store(request).set_video_category(video_id, body.category)
+
+
 @router.patch("/videos/{video_id}/favorite")
 def set_video_favorite(
     request: Request, video_id: int, body: FavoriteUpdate
@@ -396,6 +432,9 @@ def scrape_video(
         video_id,
         force=body.force,
         overwrite_manual=body.overwrite_manual,
+        source_id=body.source_id,
+        remember_source=body.remember_source,
+        reset=body.reset,
     )
     return {"job_id": job_id}
 

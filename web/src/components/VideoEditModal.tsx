@@ -6,7 +6,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { VideoDetail } from "../api";
-import { api } from "../api";
+import { api, CATEGORY_LABELS } from "../api";
 import { errorMessage } from "../format";
 import { Modal } from "./Modal";
 import { VideoMergePicker } from "./VideoMergePicker";
@@ -44,6 +44,8 @@ export function VideoEditModal({
   onMerged: () => void;
 }) {
   const metadata = detail.metadata;
+  // 视频分类单独保存；改动后会标记为手动，不再随目录分类变化。
+  const [category, setCategory] = useState(detail.video.category ?? "other");
   const [title, setTitle] = useState(metadata?.title ?? "");
   const [originalTitle, setOriginalTitle] = useState(metadata?.original_title ?? "");
   const [releaseDate, setReleaseDate] = useState(metadata?.release_date ?? "");
@@ -130,6 +132,9 @@ export function VideoEditModal({
       if (Object.keys(patch).length > 1) {
         await api.updateVideoMetadata(detail.video.id, patch);
       }
+      if (category !== (detail.video.category ?? "other")) {
+        await api.setVideoCategory(detail.video.id, category);
+      }
       // 文件与 URL 同时存在时以文件为准，避免一次保存下载两次封面。
       if (coverFile) {
         await api.uploadVideoCover(detail.video.id, coverFile);
@@ -186,6 +191,20 @@ export function VideoEditModal({
         <div>
           <FieldLabel>番号</FieldLabel>
           <input value={code} onChange={(event) => setCode(event.target.value)} className={INPUT} />
+        </div>
+        <div>
+          <FieldLabel>媒体类型</FieldLabel>
+          <select
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+            className={INPUT}
+          >
+            {CATEGORY_LABELS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <FieldLabel>发行日期</FieldLabel>

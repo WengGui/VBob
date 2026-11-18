@@ -6,7 +6,7 @@
  */
 import { useState } from "react";
 import type { Source } from "../api";
-import { api } from "../api";
+import { api, CATEGORY_LABELS } from "../api";
 import { errorMessage } from "../format";
 import { Modal } from "./Modal";
 import { PlusIcon, TrashIcon } from "./Icons";
@@ -22,13 +22,16 @@ interface FieldOption {
 
 const VIDEO_FIELDS: FieldOption[] = [
   { key: "title", label: "名称" },
+  { key: "original_title", label: "原名" },
   { key: "code", label: "番号" },
   { key: "release_date", label: "发行日期" },
   { key: "actresses", label: "演员" },
   { key: "tags", label: "标签" },
+  { key: "genres", label: "类型" },
   { key: "cover_url", label: "封面" },
   { key: "runtime_sec", label: "时长" },
   { key: "series", label: "系列" },
+  { key: "director", label: "导演" },
   { key: "censored", label: "是否有码" },
   { key: "country", label: "国家/地区" },
   { key: "studio", label: "厂商" },
@@ -65,7 +68,8 @@ function parseExtract(config: Record<string, unknown>): ExtractRow[] {
   const extract = config.extract;
   if (!extract || typeof extract !== "object") return [];
   return Object.entries(extract as Record<string, unknown>)
-    .filter(([, value]) => typeof value === "string")
+    // 以 "_" 开头的字段是详情请求用的中间变量（如 _tmdb_id），不在行编辑器中展示。
+    .filter(([field, value]) => typeof value === "string" && !field.startsWith("_"))
     .map(([field, value]) => {
       const text = String(value);
       const split = text.indexOf(":");
@@ -102,12 +106,16 @@ export function SourceForm({
       : null;
   // 保留无法用行编辑器表达的其他结构化提取配置，避免保存时丢失。
   const extraExtract = Object.fromEntries(
-    Object.entries(extractConfig).filter(
-      ([field, value]) => typeof value !== "string" && field !== "actresses",
+    Object.entries(extractConfig).filter(([field, value]) =>
+      typeof value === "string" ? field.startsWith("_") : field !== "actresses",
     ),
   );
   const [type, setType] = useState(
     typeof config.type === "string" ? config.type : "feature",
+  );
+  // 媒体类型决定该源会参与哪一类视频的刮削。
+  const [category, setCategory] = useState(
+    typeof config.category === "string" ? config.category : "other",
   );
   const [name, setName] = useState(source?.name ?? "");
   const [feature, setFeature] = useState(
@@ -121,6 +129,11 @@ export function SourceForm({
   );
   const [encoding, setEncoding] = useState(
     typeof request.encoding === "string" ? request.encoding : "auto",
+  );
+  // 源级变量主要用于 TMDB 这类需要 API 密钥的接口，URL 里用 {api_key} 引用。
+  const sourceVars = (config.vars ?? {}) as Record<string, unknown>;
+  const [apiKey, setApiKey] = useState(
+    typeof sourceVars.api_key === "string" ? sourceVars.api_key : "",
   );
   const [rows, setRows] = useState<ExtractRow[]>(() => {
     const parsed = parseExtract(config);
@@ -220,15 +233,22 @@ export function SourceForm({
     }
     // 保留 source 原有的其他配置，只覆盖表单负责的字段；
     // request 同样合并，避免丢失 headers、body 等界面未展示的设置。
+    const nextVars: Record<string, unknown> = { ...sourceVars };
+    if (apiKey.trim()) nextVars.api_key = apiKey.trim();
+    else delete nextVars.api_key;
     const payload: Record<string, unknown> = {
       ...(source?.config ?? {}),
       name: name.trim(),
       enabled,
       priority: Number(priority),
       type,
+      category,
       request: { ...request, url: url.trim(), method, encoding },
       extract,
+      vars: nextVars,
     };
+    // 没有变量时删掉空对象，避免给普通源写入无意义的配置。
+    if (!Object.keys(nextVars).length) delete payload.vars;
     // feature 只对“按特征查询”的源有意义，切换类型时清理旧配置。
     if (type === "feature") payload.feature = feature.trim();
     else delete payload.feature;
@@ -284,11 +304,25 @@ export function SourceForm({
           />
         </div>
         <div>
-          <Label>类型</Label>
+          <Label>源类型</Label>
           <select value={type} onChange={(event) => changeType(event.target.value)} className={INPUT}>
             <option value="feature">按特征查询（番号等）</option>
-            <option value="query">按标题搜索（降级）</option>
+            <option value="query">按标题搜索</option>
             <option value="actress">演员资料源</option>
+          </select>
+        </div>
+        <div>
+          <Label>媒体类型</Label>
+          <select
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+            className={INPUT}
+          >
+            {CATEGORY_LABELS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
           </select>
         </div>
         {type === "feature" && (
@@ -328,6 +362,18 @@ export function SourceForm({
             placeholder="https://example.com/search/{jav_code}"
             className={INPUT}
           />
+        </div>
+        <div className="sm:col-span-2">
+          <Label>API 密钥（可选）</Label>
+          <input
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder="TMDB 的 API Key；URL 中用 {api_key} 引用"
+            className={INPUT}
+          />
+          <p className="mt-1 text-[11px] text-zinc-400">
+            只保存在本地数据库；留空表示该源不需要密钥。
+          </p>
         </div>
         <div>
           <Label>请求方法</Label>

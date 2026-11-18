@@ -184,6 +184,7 @@ class Scanner:
                                 mtime=entry.mtime,
                                 features=features,
                                 scan_status=scan_status,
+                                category=root.get("category", "other"),
                             )
                         except Exception as exc:  # noqa: BLE001
                             self.summary.failed += 1

@@ -26,7 +26,8 @@ import jmespath
 from charset_normalizer import from_bytes
 from parsel import Selector
 
-from .errors import JobCanceled
+from .categories import CATEGORY_LABELS, DEFAULT_CATEGORY
+from .errors import JobCanceled, NotFoundError
 from .images import download_image, save_cover
 from .store import Store
 
@@ -72,6 +73,10 @@ class _SkipSource(Exception):
     """源配置缺少必要占位符或 URL 非法时抛出，用于静默跳过该源。"""
 
 
+class _RequestFailed(Exception):
+    """请求失败（网络错误、非 2xx、验证页）；消息直接作为源失败原因。"""
+
+
 @dataclass
 class SourceResult:
     """单个源的成功结果：归一化字段、演员、匹配依据与原始数据摘要。"""
@@ -95,11 +100,79 @@ class SourceRunner:
         """执行一个源，返回 (结果, 错误信息)；跳过该源时返回 (None, 原因)。"""
         config = source["config"]
         request = config.get("request") or {}
+        # vars 是源级常量（如 API 密钥）；同名时以视频特征为准。
+        merged = {**dict(config.get("vars") or {}), **values}
         try:
-            url = self._fill_placeholders(str(request.get("url", "")), values)
+            text, final_url = self._fetch(request, merged)
+            fields, actress_specs, warnings = self._extract(
+                config.get("extract") or {}, text, final_url, config
+            )
+            # 详情请求：用第一次提取到的字段补齐 URL 占位符（如 TMDB 的 movie id）。
+            detail = config.get("detail")
+            if isinstance(detail, dict) and detail.get("url"):
+                detail_fields, detail_actresses, detail_warnings = self._run_detail(
+                    detail, request, config, {**merged, **fields}
+                )
+                warnings.extend(detail_warnings)
+                # 详情结果优先于列表结果，例如详情接口返回更完整的简介。
+                fields.update(detail_fields)
+                if detail_actresses:
+                    actress_specs = detail_actresses
         except _SkipSource as exc:
             return None, str(exc)
+        except _RequestFailed as exc:
+            return None, str(exc)
 
+        # 以 "_" 开头的字段只作为详情请求的中间变量，不写入元数据。
+        fields = {
+            key: value for key, value in fields.items() if not key.startswith("_")
+        }
+        actress_names = [item["name"] for item in actress_specs if item.get("name")]
+
+        # 标题命中错误页特征时丢弃整个结果，避免把 404 页写成元数据。
+        deny = tuple(config.get("deny_title_patterns") or DEFAULT_DENY)
+        title = fields.get("title")
+        if title and any(pattern.lower() in str(title).lower() for pattern in deny):
+            return None, f"疑似错误页：{title}"
+
+        # 默认值只补充缺失字段，不覆盖已提取到的值（优先级最低）。
+        for field, default in (config.get("defaults") or {}).items():
+            if field in fields or field == "actresses":
+                continue
+            normalized_default = _normalize_field(field, default, final_url, config)
+            if normalized_default not in (None, "", []):
+                fields[field] = normalized_default
+
+        if not fields and not actress_names:
+            message = "未提取到任何字段"
+            if warnings:
+                message += f"（{warnings[0]}）"
+            return None, message
+
+        raw = json.dumps(
+            {"fields": fields, "actresses": actress_specs or actress_names},
+            ensure_ascii=False,
+        )[:20000]
+        matched_by = (
+            str(config.get("feature")) if config.get("type") == "feature" else
+            "actress_name" if config.get("type") == "actress" else "title"
+        )
+        return (
+            SourceResult(
+                source_name=source["name"],
+                fields=fields,
+                actresses=actress_specs,
+                matched_by=matched_by,
+                raw=raw,
+            ),
+            None,
+        )
+
+    def _fetch(
+        self, request: dict[str, Any], values: dict[str, Any]
+    ) -> tuple[str, str]:
+        """执行一次请求，返回 (响应文本, 最终 URL)；失败抛 _RequestFailed。"""
+        url = self._fill_placeholders(str(request.get("url", "")), values)
         method = str(request.get("method", "GET")).upper()
         headers = dict(DEFAULT_HEADERS)
         # 源配置的自定义头（如 Referer、Cookie）覆盖默认浏览器头。
@@ -137,16 +210,24 @@ class SourceRunner:
             if attempt < retries:
                 time.sleep(min(2.0, 0.5 * (attempt + 1)))
         if response is None or response.status_code >= 400:
-            return None, last_error or "请求失败"
+            raise _RequestFailed(last_error or "请求失败")
 
         text = _decode(response.content, response, encoding)
         # 部分站点会跳转到年龄验证页：页面可访问但没有目标内容。
         if "driver-verify" in str(response.url):
-            return None, "站点要求年龄验证，请配置有效 Cookies 或更换源"
-        selector = Selector(text=text, base_url=str(response.url))
-        json_data: Any = None
-        extract = config.get("extract") or {}
+            raise _RequestFailed("站点要求年龄验证，请配置有效 Cookies 或更换源")
+        return text, str(response.url)
 
+    def _extract(
+        self,
+        extract: dict[str, Any],
+        text: str,
+        base_url: str,
+        config: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:
+        """按提取规则解析一次响应，返回 (字段, 结构化演员, 警告)。"""
+        selector = Selector(text=text, base_url=base_url)
+        json_data: Any = None
         fields: dict[str, Any] = {}
         actress_specs: list[dict[str, str]] = []
         actress_names: list[str] = []
@@ -156,7 +237,7 @@ class SourceRunner:
             try:
                 if field == "actresses" and isinstance(expression, dict):
                     actress_specs = self._extract_structured_actresses(
-                        selector, expression, str(response.url), config
+                        selector, expression, base_url, config
                     )
                     actress_names = [item["name"] for item in actress_specs if item.get("name")]
                     continue
@@ -173,7 +254,7 @@ class SourceRunner:
                 value = _extract_expression(
                     expression, selector, json_data, text, multi
                 )
-                normalized = _normalize_field(field, value, str(response.url), config)
+                normalized = _normalize_field(field, value, base_url, config)
                 if normalized is None or normalized == [] or normalized == "":
                     continue
                 if field == "actresses":
@@ -186,50 +267,28 @@ class SourceRunner:
             except Exception as exc:  # noqa: BLE001 - one bad field should not kill the source
                 warnings.append(f"{field}: {exc}")
 
-        # 标题命中错误页特征时丢弃整个结果，避免把 404 页写成元数据。
-        deny = tuple(config.get("deny_title_patterns") or DEFAULT_DENY)
-        title = fields.get("title")
-        if title and any(pattern.lower() in str(title).lower() for pattern in deny):
-            return None, f"疑似错误页：{title}"
-
-        # 默认值只补充缺失字段，不覆盖已提取到的值（优先级最低）。
-        for field, default in (config.get("defaults") or {}).items():
-            if field in fields or field == "actresses":
-                continue
-            normalized_default = _normalize_field(
-                field, default, str(response.url), config
-            )
-            if normalized_default not in (None, "", []):
-                fields[field] = normalized_default
-
-        if not fields and not actress_names:
-            message = "未提取到任何字段"
-            if warnings:
-                message += f"（{warnings[0]}）"
-            return None, message
-
         # 仅有字符串演员名时统一转成结构化条目，方便上层处理。
         if actress_names and not actress_specs:
             actress_specs = [{"name": name} for name in actress_names]
+        return fields, actress_specs, warnings
 
-        raw = json.dumps(
-            {"fields": fields, "actresses": actress_specs or actress_names},
-            ensure_ascii=False,
-        )[:20000]
-        matched_by = (
-            str(config.get("feature")) if config.get("type") == "feature" else
-            "actress_name" if config.get("type") == "actress" else "title"
-        )
-        return (
-            SourceResult(
-                source_name=source["name"],
-                fields=fields,
-                actresses=actress_specs,
-                matched_by=matched_by,
-                raw=raw,
-            ),
-            None,
-        )
+    def _run_detail(
+        self,
+        detail: dict[str, Any],
+        request: dict[str, Any],
+        config: dict[str, Any],
+        values: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:
+        """执行详情请求；失败时只返回警告，保留第一次请求的结果。"""
+        # 详情请求默认沿用主请求的头、超时与限流配置，只覆盖详情块里写明的项。
+        merged = {**request, **detail}
+        try:
+            text, final_url = self._fetch(merged, values)
+            return self._extract(detail.get("extract") or {}, text, final_url, config)
+        except (_SkipSource, _RequestFailed) as exc:
+            # 详情失败不影响列表结果，但写日志便于排查；不打印 URL 以免泄露密钥。
+            log.warning("detail request failed: %s", exc)
+            return {}, [], [f"detail: {exc}"]
 
     @staticmethod
     def _fill_placeholders(template: str, values: dict[str, Any]) -> str:
@@ -314,21 +373,92 @@ class Scraper:
         """返回已启用的源，顺序沿用 store 中的优先级排序。"""
         return [source for source in self.store.list_sources() if source["enabled"]]
 
+    def _sources_for_video(
+        self, video: dict[str, Any], meta: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], str | None, str]:
+        """按偏好 → 目录 → 分类的顺序解析本次要执行的源。
+
+        返回 ``(sources, error, status)``；``sources`` 已经按用户选择顺序排列，
+        且只包含 feature/query 类型（演员源不参与视频刮削）。
+        完全没有可用源时 status 为 no_match，配置失效时为 failed。
+        """
+        enabled = [
+            source
+            for source in self._sources()
+            if source["config"].get("type") in {"feature", "query"}
+        ]
+        by_id = {int(source["id"]): source for source in enabled}
+
+        # 1. 视频记住的偏好源；不存在或已禁用时清除偏好并继续往下找。
+        preferred = meta.get("source_id")
+        if preferred is not None:
+            source = by_id.get(int(preferred))
+            if source is not None:
+                return [source], None, "failed"
+            self.store.set_source_preference(int(video["id"]), None)
+
+        # 2. 目录限定的源：完全按用户勾选顺序执行，忽略全局优先级。
+        root = None
+        if video.get("root_id") is not None:
+            try:
+                root = self.store.get_root(int(video["root_id"]))
+            except NotFoundError:
+                root = None
+        if root and root.get("source_ids"):
+            selected = [
+                by_id[item]
+                for item in root["source_ids"]
+                if item in by_id
+            ]
+            if not selected:
+                return [], "该目录配置的刮削源均已删除或禁用", "failed"
+            return selected, None, "failed"
+
+        # 3. 分类下所有启用的源，按全局优先级排序。
+        category = str(video.get("category") or DEFAULT_CATEGORY)
+        matched = [
+            source
+            for source in enabled
+            if str(source.get("category") or DEFAULT_CATEGORY) == category
+        ]
+        if not matched:
+            label = CATEGORY_LABELS.get(category, category)
+            return [], f"没有可用于「{label}」的刮削源", "no_match"
+        return matched, None, "failed"
+
     def scrape_video(
         self,
         video_id: int,
         *,
         force: bool = False,
         overwrite_manual: bool = False,
+        source_id: int | None = None,
+        remember_source: bool = False,
+        reset: bool = False,
     ) -> dict[str, Any]:
         """刮削单个视频，返回含 status/sources/errors 的结果字典。
 
         force=False 且资料已完整时直接跳过；force=True 可强制重新拉取。
         overwrite_manual 控制是否覆盖用户手动编辑过的字段。
+        源的选择顺序：视频偏好源 → 目录限定源（按勾选顺序）→ 分类下全部启用源。
+        ``remember_source`` 为真时把 ``source_id`` 写成视频偏好（null 表示清除）。
+        ``reset`` 会先清空非手动字段，适合切换源后完整重写资料。
         """
         detail = self.store.get_video(video_id)
         video = detail["video"]
         meta = detail["metadata"] or {}
+
+        if remember_source:
+            self.store.set_source_preference(video_id, source_id)
+            detail = self.store.get_video(video_id)
+            video = detail["video"]
+            meta = detail["metadata"] or {}
+        if reset:
+            self.store.clear_scraped_fields(video_id)
+            detail = self.store.get_video(video_id)
+            video = detail["video"]
+            meta = detail["metadata"] or {}
+
         # 已完整且非强制时省去网络请求。
         if meta.get("is_complete") and not force:
             return {"status": "skipped", "message": "资料已完整"}
@@ -343,14 +473,10 @@ class Scraper:
         values["code"] = meta.get("code") or features.get("jav_code")
         values["jav_code"] = values["code"]
         manual = set(meta.get("manual_fields") or [])
-        sources = self._sources()
-        # feature 源靠文件名特征直接拼接 URL；query 源需要标题搜索。
-        feature_sources = [
-            source for source in sources if source["config"].get("type") == "feature"
-        ]
-        query_sources = [
-            source for source in sources if source["config"].get("type") == "query"
-        ]
+        sources, source_error, source_status = self._sources_for_video(video, meta)
+        if source_error:
+            self.store.mark_video_scrape_status(video_id, source_status)
+            return {"status": source_status, "message": source_error}
 
         accumulated: dict[str, Any] = {}
         actress_refs: list[dict[str, str]] = []
@@ -359,7 +485,7 @@ class Scraper:
         matched_by = ""
         errors: list[str] = []
 
-        for source in [*feature_sources, *query_sources]:
+        for source in sources:
             config = source["config"]
             source_type = config.get("type")
             # 缺少 feature 或标题时跳过对应源，避免发起必然失败的请求。
@@ -430,6 +556,7 @@ class Scraper:
             video_id,
             accumulated,
             source_name=matched_sources[0],
+            source_names=matched_sources,
             matched_by=matched_by,
             actresses=actress_refs or None,
             raw_payload=raw_payload,
@@ -812,10 +939,12 @@ def _absolute_url(value: str, base_url: str, config: dict[str, Any]) -> str:
     # 协议相对地址（//cdn...）默认补 https。
     if value.startswith("//"):
         return "https:" + value
-    # 静态资源可能与页面不同域，配置了 asset_base_url 时优先用它。
+    # 静态资源可能与页面/接口不同域；配置后对根相对路径也生效，
+    # 例如 TMDB 的 poster_path（/abc.jpg）需要拼到 image.tmdb.org 而不是 API 域名。
     asset_base = str(config.get("asset_base_url") or "")
-    if asset_base and not value.startswith("/"):
-        return urljoin(asset_base if asset_base.endswith("/") else asset_base + "/", value)
+    if asset_base:
+        base = asset_base if asset_base.endswith("/") else asset_base + "/"
+        return urljoin(base, value.lstrip("/"))
     return urljoin(base_url, value)
 
 

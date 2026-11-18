@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from .categories import CATEGORY_VALUES, DEFAULT_CATEGORY, normalize_category
 from .config import DEFAULT_SETTINGS, deep_merge
 from .db import Database, utc_now
 from .default_sources import DEFAULT_SOURCES
@@ -147,7 +148,12 @@ class Store:
         return data
 
     def create_root(
-        self, path: str, enabled: bool = True, scan_interval_minutes: int = 0
+        self,
+        path: str,
+        enabled: bool = True,
+        scan_interval_minutes: int = 0,
+        category: str = DEFAULT_CATEGORY,
+        source_ids: Iterable[int] | None = None,
     ) -> dict[str, Any]:
         """新增扫描目录，拒绝重复目录以及与已有目录的父子重叠。"""
         resolved = canonical_path(path)
@@ -155,8 +161,10 @@ class Store:
         if not Path(resolved).is_dir():
             raise InvalidError(f"目录不存在或不是目录: {resolved}")
         _validate_interval(scan_interval_minutes)
+        category = normalize_category(category)
         with self.db.connection() as conn:
             existing = conn.execute("SELECT id, path, path_key FROM scan_roots").fetchall()
+            selected = self._validate_source_ids(conn, source_ids or [])
         for row in existing:
             if row["path_key"] == key:
                 raise ConflictError(f"扫描目录已存在: {row['path']}")
@@ -167,10 +175,40 @@ class Store:
         with self.db.connection() as conn:
             cur = conn.execute(
                 "INSERT INTO scan_roots(path, path_key, enabled, scan_interval_minutes, "
-                "last_scan_status, created_at) VALUES(?, ?, ?, ?, 'idle', ?)",
-                (resolved, key, int(enabled), scan_interval_minutes, now),
+                "category, source_ids, last_scan_status, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, 'idle', ?)",
+                (
+                    resolved,
+                    key,
+                    int(enabled),
+                    scan_interval_minutes,
+                    category,
+                    json.dumps(selected),
+                    now,
+                ),
             )
         return self.get_root(int(cur.lastrowid))
+
+    @staticmethod
+    def _validate_source_ids(conn: Any, source_ids: Iterable[int]) -> list[int]:
+        """校验目录限定的源 ID：去重并保持顺序，同时确认源存在。"""
+        ids: list[int] = []
+        for item in source_ids:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise InvalidError("source_ids 必须是刮削源 ID 数组")
+            if item not in ids:
+                ids.append(item)
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT id FROM sources WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        found = {int(row["id"]) for row in rows}
+        missing = [str(item) for item in ids if item not in found]
+        if missing:
+            raise InvalidError(f"刮削源不存在: {', '.join(missing)}")
+        return ids
 
     def update_root(
         self,
@@ -179,18 +217,33 @@ class Store:
         enabled: bool | None = None,
         path: str | None = None,
         scan_interval_minutes: int | None = None,
+        category: str | None = None,
+        source_ids: Iterable[int] | None = None,
     ) -> dict[str, Any]:
-        """更新目录的启用状态、路径或自动扫描间隔。
+        """更新目录的启用状态、路径、扫描间隔、分类或限定源。
 
         修改路径时会把该目录下已有视频的相对位置映射到新根目录，
         元数据仍通过 video_id 关联，因此无需搬迁。
         """
         root = self.get_root(root_id)
-        if enabled is None and path is None and scan_interval_minutes is None:
+        if (
+            enabled is None
+            and path is None
+            and scan_interval_minutes is None
+            and category is None
+            and source_ids is None
+        ):
             raise InvalidError("至少需要提供一个要修改的目录设置")
         if scan_interval_minutes is not None:
             _validate_interval(scan_interval_minutes)
+        if category is not None:
+            category = normalize_category(category)
         with self.db.transaction() as conn:
+            selected = (
+                self._validate_source_ids(conn, source_ids)
+                if source_ids is not None
+                else None
+            )
             if path is not None:
                 resolved = canonical_path(path)
                 if not Path(resolved).is_dir():
@@ -316,6 +369,18 @@ class Store:
             if scan_interval_minutes is not None:
                 updates.append("scan_interval_minutes=?")
                 params.append(scan_interval_minutes)
+            if category is not None:
+                updates.append("category=?")
+                params.append(category)
+                # 分类变化时同步目录下的视频，但保留用户手动改过分类的记录。
+                conn.execute(
+                    "UPDATE videos SET category=?, updated_at=? "
+                    "WHERE root_id=? AND category_manual=0",
+                    (category, utc_now(), root_id),
+                )
+            if selected is not None:
+                updates.append("source_ids=?")
+                params.append(json.dumps(selected))
             if updates:
                 params.append(root_id)
                 conn.execute(f"UPDATE scan_roots SET {', '.join(updates)} WHERE id=?", params)
@@ -461,6 +526,9 @@ class Store:
         data = _row_dict(row)
         data["enabled"] = bool(data["enabled"])
         data["scan_interval_minutes"] = int(data.get("scan_interval_minutes") or 0)
+        data["category"] = data.get("category") or DEFAULT_CATEGORY
+        # source_ids 以 JSON 数组存储，空数组表示“该分类下全部启用源”。
+        data["source_ids"] = [int(item) for item in _json_load(data.get("source_ids"), [])]
         return data
 
     # ------------------------------------------------------------------- sources
@@ -491,12 +559,14 @@ class Store:
             now = utc_now()
             # 完整配置存 config_json；name/enabled/priority 另存列以支持唯一约束和排序。
             cur = conn.execute(
-                "INSERT INTO sources(name, enabled, priority, version, config_json, "
-                "builtin, created_at, updated_at) VALUES(?, ?, ?, 1, ?, 0, ?, ?)",
+                "INSERT INTO sources(name, enabled, priority, category, version, "
+                "config_json, builtin, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, 1, ?, 0, ?, ?)",
                 (
                     name,
                     int(normalized["enabled"]),
                     normalized["priority"],
+                    normalized["category"],
                     json.dumps(normalized, ensure_ascii=False),
                     now,
                     now,
@@ -519,12 +589,13 @@ class Store:
             if duplicate:
                 raise ConflictError(f"源名称已存在: {normalized['name']}")
             conn.execute(
-                "UPDATE sources SET name=?, enabled=?, priority=?, version=version+1, "
-                "config_json=?, updated_at=? WHERE id=?",
+                "UPDATE sources SET name=?, enabled=?, priority=?, category=?, "
+                "version=version+1, config_json=?, updated_at=? WHERE id=?",
                 (
                     normalized["name"],
                     int(normalized["enabled"]),
                     normalized["priority"],
+                    normalized["category"],
                     json.dumps(normalized, ensure_ascii=False),
                     utc_now(),
                     source_id,
@@ -533,12 +604,27 @@ class Store:
         return self.get_source(source_id)
 
     def delete_source(self, source_id: int) -> None:
-        """删除自定义源；内置源保留。"""
+        """删除自定义源；内置源保留。
+
+        同时清理目录限定列表和视频记住的偏好源，避免留下无效引用。
+        """
         source = self.get_source(source_id)
         if source["builtin"]:
             raise ConflictError("内置源不可删除，只能禁用")
-        with self.db.connection() as conn:
+        with self.db.transaction() as conn:
             conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+            roots = conn.execute("SELECT id, source_ids FROM scan_roots").fetchall()
+            for root in roots:
+                selected = _json_load(root["source_ids"], [])
+                if source_id in selected:
+                    remaining = [item for item in selected if item != source_id]
+                    conn.execute(
+                        "UPDATE scan_roots SET source_ids=? WHERE id=?",
+                        (json.dumps(remaining), int(root["id"])),
+                    )
+            conn.execute(
+                "UPDATE metadata SET source_id=NULL WHERE source_id=?", (source_id,)
+            )
 
     def update_source_state(
         self, source_id: int, *, enabled: bool | None = None, priority: int | None = None
@@ -618,12 +704,14 @@ class Store:
                 continue
             config = validate_source_config(raw)
             conn.execute(
-                "INSERT INTO sources(name, enabled, priority, version, config_json, "
-                "builtin, created_at, updated_at) VALUES(?, ?, ?, 1, ?, 0, ?, ?)",
+                "INSERT INTO sources(name, enabled, priority, category, version, "
+                "config_json, builtin, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, 1, ?, 0, ?, ?)",
                 (
                     config["name"],
                     int(config["enabled"]),
                     int(config["priority"]),
+                    config["category"],
                     json.dumps(config, ensure_ascii=False),
                     now,
                     now,
@@ -749,7 +837,8 @@ class Store:
         pipeline = FeaturePipeline()
         with self.db.transaction() as conn:
             video = conn.execute(
-                "SELECT id, root_id FROM videos WHERE id=?", (video_id,)
+                "SELECT id, root_id, category, category_manual FROM videos WHERE id=?",
+                (video_id,),
             ).fetchone()
             if video is None:
                 raise NotFoundError("视频不存在")
@@ -806,9 +895,9 @@ class Store:
                     """
                     INSERT INTO videos(
                         root_id, path, path_key, filename, size_bytes, mtime,
-                        duration_sec, features, present, missing_since,
-                        scan_status, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scanned', ?, ?)
+                        duration_sec, features, category, category_manual,
+                        present, missing_since, scan_status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scanned', ?, ?)
                     """,
                     (
                         video["root_id"],
@@ -819,6 +908,8 @@ class Store:
                         file["mtime"],
                         file["duration_sec"],
                         json.dumps(features, ensure_ascii=False),
+                        video["category"],
+                        int(video["category_manual"]),
                         int(file["present"]),
                         file["missing_since"],
                         now,
@@ -1036,12 +1127,15 @@ class Store:
         mtime: int,
         features: dict[str, Any],
         scan_status: str = "scanned",
+        category: str = DEFAULT_CATEGORY,
     ) -> tuple[int, int, bool]:
         """新增或刷新一个视频文件，返回 ``(video_id, file_id, created)``。
 
         有番号的同一目录文件会挂到同一个 videos 分组下；没有番号的文件
         每个都是独立分组。已存在的文件复用原记录，从而保留元数据和收藏。
+        新视频继承目录分类；已存在且未被手动改过分类的视频随目录更新。
         """
+        category = normalize_category(category)
         now = utc_now()
         features_json = json.dumps(features, ensure_ascii=False)
         with self.db.transaction() as conn:
@@ -1074,20 +1168,24 @@ class Store:
                     if old_features.get("manual_separate"):
                         updated_features["manual_separate"] = True
                     conn.execute(
-                        "UPDATE videos SET root_id=?, features=?, scan_status=?, updated_at=? "
-                        "WHERE id=?",
+                        "UPDATE videos SET root_id=?, features=?, scan_status=?, "
+                        "category=CASE WHEN category_manual=0 THEN ? ELSE category END, "
+                        "updated_at=? WHERE id=?",
                         (
                             root_id,
                             json.dumps(updated_features, ensure_ascii=False),
                             scan_status,
+                            category,
                             now,
                             video_id,
                         ),
                     )
                 else:
                     conn.execute(
-                        "UPDATE videos SET root_id=?, scan_status=?, updated_at=? WHERE id=?",
-                        (root_id, scan_status, now, video_id),
+                        "UPDATE videos SET root_id=?, scan_status=?, "
+                        "category=CASE WHEN category_manual=0 THEN ? ELSE category END, "
+                        "updated_at=? WHERE id=?",
+                        (root_id, scan_status, category, now, video_id),
                     )
                 self._refresh_video_from_files(conn, video_id)
                 return video_id, int(existing["id"]), False
@@ -1132,11 +1230,11 @@ class Store:
                 """
                 INSERT INTO videos(
                     root_id, path, path_key, filename, size_bytes, mtime, features,
-                    present, scan_status, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    category, present, scan_status, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
                 (root_id, path, key, filename, size, mtime, features_json,
-                 scan_status, now, now),
+                 category, scan_status, now, now),
             )
             video_id = int(cur.lastrowid)
             cur = conn.execute(
@@ -1217,11 +1315,15 @@ class Store:
         series: str | None = None,
         censored: str | None = None,
         scraped: bool | None = None,
+        category: str | None = None,
         seed: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """分页查询视频摘要，返回 ``(items, total)``。"""
         conditions: list[str] = []
         params: list[Any] = []
+        if category is not None:
+            conditions.append("v.category=?")
+            params.append(normalize_category(category))
         if q:
             # 关键词同时匹配任意文件名、路径、标题、番号和演员名。
             needle = f"%{q.strip()}%"
@@ -1292,14 +1394,14 @@ class Store:
         offset = (page - 1) * page_size
 
         base_sql = """
-            SELECT v.id, v.path, v.filename, v.size_bytes, v.mtime, v.duration_sec,
-                   v.screenshot, v.features, v.present, v.missing_since, v.favorite,
-                   v.scan_status, v.created_at, v.updated_at,
+            SELECT v.id, v.path, v.filename, v.category, v.size_bytes, v.mtime,
+                   v.duration_sec, v.screenshot, v.features, v.present,
+                   v.missing_since, v.favorite, v.scan_status, v.created_at, v.updated_at,
                    (SELECT COUNT(*) FROM video_files f
                     WHERE f.video_id=v.id AND f.present=1) AS file_count,
                    m.video_id AS metadata_video_id, m.title, m.original_title, m.year,
                    m.code, m.cover_url, m.cover_local, m.scrape_status, m.source_name,
-                   m.last_scraped_at, m.genres, m.tags, m.actresses, m.studio,
+                   m.source_names, m.last_scraped_at, m.genres, m.tags, m.actresses, m.studio,
                    m.series, m.release_date, m.runtime_sec, m.censored, m.country,
                    m.is_complete
             FROM videos v
@@ -1496,6 +1598,7 @@ class Store:
                 "cover_local": data.pop("cover_local", None),
                 "scrape_status": data.pop("scrape_status", None),
                 "source_name": data.pop("source_name", None),
+                "source_names": _json_load(data.pop("source_names", None), []),
                 "last_scraped_at": data.pop("last_scraped_at", None),
                 "genres": _json_load(data.pop("genres", None), []),
                 "tags": _json_load(data.pop("tags", None), []),
@@ -1512,7 +1615,7 @@ class Store:
             # 没有元数据行时，把 JOIN 带出的 NULL 列全部移除，避免混入视频字段。
             for key in (
                 "title", "original_title", "year", "code", "cover_url", "cover_local",
-                "scrape_status", "source_name", "last_scraped_at",
+                "scrape_status", "source_name", "source_names", "last_scraped_at",
                 "genres", "tags", "actresses", "studio", "release_date", "runtime_sec",
                 "censored", "country", "is_complete",
             ):
@@ -1765,6 +1868,86 @@ class Store:
             raise NotFoundError("视频不存在")
         return self.get_video(video_id)
 
+    def set_video_category(self, video_id: int, category: str) -> dict[str, Any]:
+        """手动修改视频分类；之后目录改分类不会再覆盖该视频。"""
+        category = normalize_category(category)
+        with self.db.connection() as conn:
+            cur = conn.execute(
+                "UPDATE videos SET category=?, category_manual=1, updated_at=? WHERE id=?",
+                (category, utc_now(), video_id),
+            )
+        if cur.rowcount == 0:
+            raise NotFoundError("视频不存在")
+        return self.get_video(video_id)
+
+    def set_source_preference(
+        self, video_id: int, source_id: int | None
+    ) -> dict[str, Any]:
+        """记录或清除视频偏好的刮削源；None 表示恢复跟随目录/分类配置。"""
+        with self.db.transaction() as conn:
+            video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if video is None:
+                raise NotFoundError("视频不存在")
+            if source_id is not None:
+                source = conn.execute(
+                    "SELECT id FROM sources WHERE id=?", (source_id,)
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("刮削源不存在")
+            self._ensure_metadata_row(conn, video_id)
+            conn.execute(
+                "UPDATE metadata SET source_id=?, version=version+1, updated_at=? "
+                "WHERE video_id=?",
+                (source_id, utc_now(), video_id),
+            )
+        return self.get_video(video_id)
+
+    def category_counts(self) -> dict[str, int]:
+        """各分类的可见视频数量；没有记录的分类返回 0，all 为合计。"""
+        counts: dict[str, int] = {value: 0 for value in CATEGORY_VALUES}
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT category, COUNT(*) AS n FROM videos WHERE present=1 "
+                "GROUP BY category"
+            ).fetchall()
+        for row in rows:
+            key = str(row["category"] or DEFAULT_CATEGORY)
+            counts[key] = counts.get(key, 0) + int(row["n"])
+        counts["all"] = sum(counts[value] for value in CATEGORY_VALUES)
+        return counts
+
+    def clear_scraped_fields(self, video_id: int) -> None:
+        """清空非手动维护的刮削字段，供切换源时完整重刮。"""
+        fields = (
+            "title", "original_title", "overview", "cover_url", "cover_local",
+            "year", "release_date", "runtime_sec", "genres", "tags", "code",
+            "studio", "series", "director", "censored", "country",
+        )
+        with self.db.transaction() as conn:
+            meta = conn.execute(
+                "SELECT * FROM metadata WHERE video_id=?", (video_id,)
+            ).fetchone()
+            if meta is None:
+                return
+            manual = set(_json_load(meta["manual_fields"], []))
+            updates = {key: None for key in fields if key not in manual}
+            conn.execute(
+                "UPDATE metadata SET source_name=NULL, source_names='[]', matched_by=NULL, "
+                "raw_payload=NULL, scrape_status='pending', version=version+1, "
+                "updated_at=? WHERE video_id=?",
+                (utc_now(), video_id),
+            )
+            if updates:
+                assignments = ", ".join(f"{key}=?" for key in updates)
+                conn.execute(
+                    f"UPDATE metadata SET {assignments} WHERE video_id=?",
+                    [*updates.values(), video_id],
+                )
+            # 演员不是手动维护时一并清空，随后由刮削重新写入。
+            if "actresses" not in manual:
+                conn.execute("DELETE FROM video_actresses WHERE video_id=?", (video_id,))
+            self._recompute_video_complete(conn, video_id)
+
     def update_video_cover(
         self, video_id: int, cover_local: str, cover_url: str | None = None
     ) -> dict[str, Any]:
@@ -1811,6 +1994,7 @@ class Store:
         *,
         source_name: str,
         matched_by: str,
+        source_names: list[str] | None = None,
         actresses: list[str | dict[str, Any]] | None = None,
         raw_payload: str | None = None,
         overwrite_manual: bool = False,
@@ -1819,6 +2003,7 @@ class Store:
 
         只接受白名单字段和 ``None`` 以外的值；默认保留手动编辑过的字段。
         无论是否实际更新字段，都会记录来源、匹配方式、原始响应和成功状态。
+        ``source_names`` 记录本次实际贡献数据的全部源，按执行顺序排列。
         """
         allowed = {
             "title", "original_title", "overview", "release_date", "year", "runtime_sec",
@@ -1850,14 +2035,17 @@ class Store:
                 updates[key] = value
             assignments = ", ".join(f"{key}=?" for key in updates)
             now = utc_now()
+            names = list(source_names or [source_name])
+            names_json = json.dumps(names, ensure_ascii=False)
             if assignments:
                 conn.execute(
-                    f"UPDATE metadata SET {assignments}, source_name=?, matched_by=?, "
-                    "raw_payload=?, scrape_status='success', last_scraped_at=?, "
-                    "version=version+1, updated_at=? WHERE video_id=?",
+                    f"UPDATE metadata SET {assignments}, source_name=?, source_names=?, "
+                    "matched_by=?, raw_payload=?, scrape_status='success', "
+                    "last_scraped_at=?, version=version+1, updated_at=? WHERE video_id=?",
                     [
                         *updates.values(),
                         source_name,
+                        names_json,
                         matched_by,
                         raw_payload,
                         now,
@@ -1868,10 +2056,10 @@ class Store:
             else:
                 # 没有可合并字段时仍更新刮削审计信息，避免前端一直显示未刮削。
                 conn.execute(
-                    "UPDATE metadata SET source_name=?, matched_by=?, raw_payload=?, "
-                    "scrape_status='success', last_scraped_at=?, version=version+1, "
-                    "updated_at=? WHERE video_id=?",
-                    (source_name, matched_by, raw_payload, now, now, video_id),
+                    "UPDATE metadata SET source_name=?, source_names=?, matched_by=?, "
+                    "raw_payload=?, scrape_status='success', last_scraped_at=?, "
+                    "version=version+1, updated_at=? WHERE video_id=?",
+                    (source_name, names_json, matched_by, raw_payload, now, now, video_id),
                 )
             # 演员列表不在 fields 白名单中，单独处理；手动填过演员时同样跳过，
             # 没有任何关联演员时允许刮削补全。
@@ -2367,6 +2555,8 @@ def _metadata_dict(row: Any) -> dict[str, Any] | None:
     data["tags"] = _json_load(data.get("tags"), [])
     data["actresses"] = _json_load(data.get("actresses"), [])
     data["manual_fields"] = _json_load(data.get("manual_fields"), [])
+    # 本次成功贡献数据的源列表；source_name 仍保留为首个源，兼容旧逻辑。
+    data["source_names"] = _json_load(data.get("source_names"), [])
     data["is_complete"] = bool(data.get("is_complete", 0))
     return data
 

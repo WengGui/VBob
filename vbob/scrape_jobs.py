@@ -22,6 +22,9 @@ def start_video_scrape(
     *,
     force: bool = True,
     overwrite_manual: bool = False,
+    source_id: int | None = None,
+    remember_source: bool = False,
+    reset: bool = False,
 ) -> str:
     """创建单视频刮削后台任务，返回 job_id。"""
     detail = store.get_video(video_id)
@@ -32,7 +35,12 @@ def start_video_scrape(
         # 传入 job_id，Scraper 才能把每次请求写入刮削日志。
         scraper = Scraper(store, data_dir, job_id)
         outcome = scraper.scrape_video(
-            video_id, force=force, overwrite_manual=overwrite_manual
+            video_id,
+            force=force,
+            overwrite_manual=overwrite_manual,
+            source_id=source_id,
+            remember_source=remember_source,
+            reset=reset,
         )
         progress(
             done=1,

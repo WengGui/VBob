@@ -7,9 +7,11 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   api,
+  CATEGORY_LABELS,
   type Actress,
   type ActressDetail,
   type Job,
+  type Source,
   type Video,
   type VideoDetail,
   type VideoFile,
@@ -84,12 +86,15 @@ function NavButton({
   active,
   onClick,
   indent = false,
+  count,
 }: {
   icon: ReactNode;
   label: string;
   active: boolean;
   onClick: () => void;
   indent?: boolean;
+  /** 右侧数量角标；undefined 表示不显示。 */
+  count?: number;
 }) {
   return (
     <button
@@ -105,7 +110,12 @@ function NavButton({
       }`}
     >
       {icon}
-      <span className="hidden lg:inline">{label}</span>
+      <span className="hidden min-w-0 flex-1 truncate text-left lg:inline">{label}</span>
+      {count !== undefined && (
+        <span className="hidden shrink-0 rounded bg-zinc-100 px-1.5 text-[10px] text-zinc-500 lg:inline dark:bg-white/5 dark:text-zinc-400">
+          {count}
+        </span>
+      )}
     </button>
   );
 }
@@ -118,6 +128,9 @@ export default function App() {
   // 初始主题只读取一次，后续由 setTheme 触发 applyTheme 同步 DOM 与 localStorage。
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [view, setView] = useState<View>("videos");
+  // 视频视图的媒体类型过滤；all 表示全部。
+  const [videoCategory, setVideoCategory] = useState("all");
+  const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
   const [favoritesOpen, setFavoritesOpen] = useState(true);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -133,6 +146,7 @@ export default function App() {
   const [incompleteOnly, setIncompleteOnly] = useState(false);
   const [unscrapedOnly, setUnscrapedOnly] = useState(false);
   const [videos, setVideos] = useState<Video[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
   const [actresses, setActresses] = useState<Actress[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -195,7 +209,21 @@ export default function App() {
     filterSeries,
     incompleteOnly,
     unscrapedOnly,
+    videoCategory,
   ]);
+
+  // 导航角标：分类数量随刷新键更新（扫描、删除、修改分类后都会触发）。
+  useEffect(() => {
+    api
+      .listVideoCategories()
+      .then(setCategoryCounts)
+      .catch(() => undefined);
+    // 详情页切换刮削源需要完整源列表。
+    api
+      .listSources()
+      .then((data) => setSources(data.items))
+      .catch(() => undefined);
+  }, [refreshKey]);
 
   // 按当前视图加载视频或演员列表；清理函数用于丢弃切换视图后返回的旧响应。
   useEffect(() => {
@@ -215,6 +243,7 @@ export default function App() {
             actressId: filterActress?.id,
             tag: filterTag ?? undefined,
             series: filterSeries ?? undefined,
+            category: videoCategory === "all" ? undefined : videoCategory,
           })
           .then((data) => {
             if (cancelled) return;
@@ -404,6 +433,26 @@ export default function App() {
       const { job_id } = await api.scrapeVideo(videoId, true);
       trackJob(job_id, "scrape_one", null);
       setNotice("刮削任务已开始");
+    } catch (error) {
+      setBanner(errorMessage(error));
+    }
+  }
+
+  // 详情页指定源重刮：记住偏好（sourceId=null 表示恢复自动），可选先清空旧资料。
+  async function startVideoScrapeWithSource(
+    videoId: number,
+    sourceId: number | null,
+    reset: boolean,
+  ) {
+    setBanner(null);
+    try {
+      const { job_id } = await api.scrapeVideo(videoId, true, false, {
+        sourceId,
+        rememberSource: true,
+        reset,
+      });
+      trackJob(job_id, "scrape_one", null);
+      setNotice(sourceId === null ? "已恢复自动源，正在刮削" : "已记住该源，正在刮削");
     } catch (error) {
       setBanner(errorMessage(error));
     }
@@ -663,9 +712,30 @@ export default function App() {
           <NavButton
             icon={<FilmIcon className="h-4 w-4" />}
             label="视频"
-            active={view === "videos"}
-            onClick={() => setView("videos")}
+            active={view === "videos" && videoCategory === "all"}
+            count={categoryCounts.all}
+            onClick={() => {
+              setView("videos");
+              setVideoCategory("all");
+            }}
           />
+          {/* 媒体分类：与目录/源的类型一致，全部视频仍从「视频」进入。 */}
+          <div className="space-y-0.5">
+            {CATEGORY_LABELS.map((item) => (
+              <NavButton
+                key={item.value}
+                icon={<span className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
+                label={item.label}
+                active={view === "videos" && videoCategory === item.value}
+                count={categoryCounts[item.value]}
+                indent
+                onClick={() => {
+                  setView("videos");
+                  setVideoCategory(item.value);
+                }}
+              />
+            ))}
+          </div>
           <NavButton
             icon={<UserIcon className="h-4 w-4" />}
             label="演员"
@@ -990,6 +1060,10 @@ export default function App() {
           onFilterSeries={(series) => applyVideoFilter({ series })}
           onDeleteFile={(fileId) => removeVideo(selectedVideoId, [fileId])}
           onDetachFile={(fileId) => void detachVideoFile(selectedVideoId, fileId)}
+          onScrapeSource={(sourceId, reset) =>
+            void startVideoScrapeWithSource(selectedVideoId, sourceId, reset)
+          }
+          sources={sources}
           playing={playing}
         />
       )}

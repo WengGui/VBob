@@ -5,8 +5,13 @@
  */
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api } from "../api";
-import type { Video, VideoDetail } from "../api";
+import {
+  api,
+  categoryLabel,
+  type Source,
+  type Video,
+  type VideoDetail,
+} from "../api";
 import {
   censoredLabel,
   codeOf,
@@ -77,6 +82,8 @@ export function VideoDetailModal({
   onFilterSeries,
   onDeleteFile,
   onDetachFile,
+  onScrapeSource,
+  sources,
   playing,
 }: {
   detail: VideoDetail | null;
@@ -94,6 +101,10 @@ export function VideoDetailModal({
   onDeleteFile: (fileId: number) => void;
   /** 把指定文件移出剧集，拆分为独立视频。 */
   onDetachFile: (fileId: number) => void;
+  /** 用指定源重刮；sourceId 为 null 表示恢复自动跟随目录配置。 */
+  onScrapeSource: (sourceId: number | null, reset: boolean) => void;
+  /** 可用源列表，用于详情页切换刮削源。 */
+  sources: Source[];
   playing: boolean;
 }) {
   const video = detail?.video;
@@ -114,6 +125,13 @@ export function VideoDetailModal({
   >([]);
   const videoId = detail?.video.id;
   const lastScraped = detail?.metadata?.last_scraped_at ?? "";
+  // 详情页的源选择：auto 表示跟随目录/分类配置，其他值表示记住的偏好源。
+  const [preferredSource, setPreferredSource] = useState("auto");
+  const [resetBeforeScrape, setResetBeforeScrape] = useState(false);
+  const preferredSourceId = metadata?.source_id ?? null;
+  useEffect(() => {
+    setPreferredSource(preferredSourceId ? String(preferredSourceId) : "auto");
+  }, [preferredSourceId, videoId]);
 
   // videoId 变化（切换详情）或 lastScraped 变化（重新刮削）时重载日志。
   useEffect(() => {
@@ -283,7 +301,14 @@ export function VideoDetailModal({
                 <Field label="国家/地区" value={metadata?.country} />
                 <Field label="厂商" value={metadata?.studio} />
                 <Field label="导演" value={metadata?.director} />
-                <Field label="刮削来源" value={metadata?.source_name} />
+                <Field
+                  label="刮削来源"
+                  value={
+                    metadata?.source_names?.length
+                      ? metadata.source_names.join("、")
+                      : metadata?.source_name
+                  }
+                />
                 <Field label="入库时间" value={formatDate(view.created_at)} />
                 <Field
                   label="简介"
@@ -297,6 +322,52 @@ export function VideoDetailModal({
                   }
                 />
               </dl>
+
+              {/* 切换刮削源：选择后记住该视频的偏好，「自动」恢复跟随目录配置。 */}
+              <div className="mt-3 rounded-xl border border-zinc-200 p-3 dark:border-white/10">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-zinc-500">指定刮削源</span>
+                  <select
+                    value={preferredSource}
+                    onChange={(event) => setPreferredSource(event.target.value)}
+                    className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[11px] text-zinc-700 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
+                  >
+                    <option value="auto">自动（跟随目录配置）</option>
+                    {sources
+                      .filter((source) => source.config.type !== "actress")
+                      .map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.name} · {categoryLabel(source.category)}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="inline-flex items-center gap-1 text-[11px] text-zinc-500">
+                    <input
+                      type="checkbox"
+                      checked={resetBeforeScrape}
+                      onChange={(event) => setResetBeforeScrape(event.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-zinc-300"
+                    />
+                    覆盖已有资料
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onScrapeSource(
+                        preferredSource === "auto" ? null : Number(preferredSource),
+                        resetBeforeScrape,
+                      )
+                    }
+                    className="rounded-md border border-sky-200 px-2 py-1 text-[11px] text-sky-600 hover:bg-sky-50 dark:border-sky-500/20 dark:text-sky-300 dark:hover:bg-sky-500/10"
+                  >
+                    用该源刮削
+                  </button>
+                </div>
+                <p className="mt-2 text-[10px] text-zinc-400">
+                  选择后会记住该视频的偏好源；点顶部刮削按钮时优先使用它。
+                  「覆盖已有资料」会先清空非手动字段。
+                </p>
+              </div>
             </section>
 
             <section>
