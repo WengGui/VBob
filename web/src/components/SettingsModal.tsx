@@ -4,10 +4,8 @@
  * 以便看到定时扫描或其他页面触发的任务状态；源编辑交给嵌套的 SourceForm。
  */
 import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
 import {
   api,
-  CATEGORY_LABELS,
   categoryLabel,
   type PlayerInfo,
   type ScanRoot,
@@ -65,14 +63,13 @@ export function SettingsModal({
   const [sources, setSources] = useState<Source[]>([]);
   // 内置源模板（TMDB / Shikimori），一键创建后再由用户补全密钥。
   const [templates, setTemplates] = useState<SourceTemplate[]>([]);
-  const [newRoot, setNewRoot] = useState("");
-  const [newInterval, setNewInterval] = useState("0");
-  const [newCategory, setNewCategory] = useState("other");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ source: Source | null } | null>(null);
-  // 目录编辑弹窗：路径和自动扫描间隔在同一表单中修改。
-  const [rootEditor, setRootEditor] = useState<ScanRoot | null>(null);
+  // 目录弹窗：root 为 null 表示新增，否则为编辑；路径、分类和限定源在同一表单中配置。
+  const [rootEditor, setRootEditor] = useState<{ root: ScanRoot | null } | null>(
+    null,
+  );
   // 目录删除弹窗：可选择只删数据或连同视频文件一起删除。
   const [deletingRoot, setDeletingRoot] = useState<ScanRoot | null>(null);
 
@@ -139,22 +136,6 @@ export function SettingsModal({
     const timer = window.setTimeout(() => setNotice(null), 4000);
     return () => window.clearTimeout(timer);
   }, [notice]);
-
-  // 添加目录前去掉首尾空白；间隔输入非法或为空时按 0（关闭自动扫描）处理。
-  async function addRoot(event: FormEvent) {
-    event.preventDefault();
-    const path = newRoot.trim();
-    if (!path) return;
-    try {
-      await api.createRoot(path, Number(newInterval) || 0, newCategory);
-      setNewRoot("");
-      setNewInterval("0");
-      await loadRoots();
-      setNotice("扫描目录已添加");
-    } catch (addError) {
-      setError(errorMessage(addError));
-    }
-  }
 
   // 按模板创建源；TMDB 模板创建后仍需在编辑弹窗里填写 API 密钥。
   async function addTemplate(template: SourceTemplate) {
@@ -295,20 +276,30 @@ export function SettingsModal({
 
             {tab === "directories" && (
               <div>
-                <div className="mb-4 flex items-center justify-between">
+                <div className="mb-4 flex items-center justify-between gap-3">
                   <p className="text-xs text-zinc-500">
                     添加本地视频目录；扫描会建立索引并统计完整度。
                   </p>
-                  {/* 扫描全部会为每个目录分别发起任务。 */}
-                  <button
-                    type="button"
-                    onClick={() => roots.forEach((root) => onStartScan(root.id))}
-                    disabled={scanning || roots.length === 0}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
-                  >
-                    <ScanIcon className="h-3.5 w-3.5" />
-                    扫描全部
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {/* 扫描全部会为每个目录分别发起任务。 */}
+                    <button
+                      type="button"
+                      onClick={() => roots.forEach((root) => onStartScan(root.id))}
+                      disabled={scanning || roots.length === 0}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                    >
+                      <ScanIcon className="h-3.5 w-3.5" />
+                      扫描全部
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRootEditor({ root: null })}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-400"
+                    >
+                      <PlusIcon className="h-3.5 w-3.5" />
+                      添加目录
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-3">
@@ -369,7 +360,7 @@ export function SettingsModal({
                           </button>
                           <button
                             type="button"
-                            onClick={() => setRootEditor(root)}
+                            onClick={() => setRootEditor({ root })}
                             className="rounded-md border border-zinc-200 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
                           >
                             编辑
@@ -410,43 +401,6 @@ export function SettingsModal({
                   )}
                 </div>
 
-                <form onSubmit={(event) => void addRoot(event)} className="mt-4 flex flex-wrap gap-2">
-                  <input
-                    value={newRoot}
-                    onChange={(event) => setNewRoot(event.target.value)}
-                    placeholder="D:\Media 或 /media/videos"
-                    className="min-w-48 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
-                  />
-                  <select
-                    value={newCategory}
-                    onChange={(event) => setNewCategory(event.target.value)}
-                    title="媒体类型"
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
-                  >
-                    {CATEGORY_LABELS.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    value={newInterval}
-                    onChange={(event) => setNewInterval(event.target.value)}
-                    title="自动扫描间隔（分钟）"
-                    inputMode="numeric"
-                    className="w-28 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 focus:border-sky-400 focus:outline-none dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-200"
-                  />
-                  <button
-                    type="submit"
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-400"
-                  >
-                    <PlusIcon className="h-4 w-4" />
-                    添加目录
-                  </button>
-                </form>
-                <p className="mt-1 text-[11px] text-zinc-500">
-                  第二个输入框为自动扫描间隔（分钟，0=关闭）
-                </p>
               </div>
             )}
 
@@ -623,7 +577,7 @@ export function SettingsModal({
       {/* 目录编辑保存后刷新列表并通知主界面，路径变更可能影响视频列表。 */}
       {rootEditor && (
         <RootSettingsModal
-          root={rootEditor}
+          root={rootEditor.root}
           onClose={() => setRootEditor(null)}
           onSaved={(message) => {
             setRootEditor(null);

@@ -27,6 +27,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { VideoCard } from "./components/VideoCard";
 import { VideoEditModal } from "./components/VideoEditModal";
 import {
+  ChevronDownIcon,
   FilmIcon,
   HeartIcon,
   MoonIcon,
@@ -87,6 +88,7 @@ function NavButton({
   onClick,
   indent = false,
   count,
+  expanded,
 }: {
   icon: ReactNode;
   label: string;
@@ -95,6 +97,8 @@ function NavButton({
   indent?: boolean;
   /** 右侧数量角标；undefined 表示不显示。 */
   count?: number;
+  /** 可折叠项传入当前展开状态，右侧显示旋转箭头；undefined 表示不可折叠。 */
+  expanded?: boolean;
 }) {
   return (
     <button
@@ -116,6 +120,13 @@ function NavButton({
           {count}
         </span>
       )}
+      {expanded !== undefined && (
+        <ChevronDownIcon
+          className={`hidden h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform lg:block ${
+            expanded ? "" : "-rotate-90"
+          }`}
+        />
+      )}
     </button>
   );
 }
@@ -132,6 +143,8 @@ export default function App() {
   const [videoCategory, setVideoCategory] = useState("all");
   const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
   const [favoritesOpen, setFavoritesOpen] = useState(true);
+  // 视频分类默认折叠，点击「视频」展开；展开时同时切到全部视频。
+  const [videosOpen, setVideosOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [videoSort, setVideoSort] = useState<string>("updated_at");
@@ -287,6 +300,7 @@ export default function App() {
     filterSeries,
     incompleteOnly,
     unscrapedOnly,
+    videoCategory,
   ]);
 
   // 任务轮询：700ms 一次以较平滑地更新进度；任务结束后递增 refreshKey，
@@ -433,6 +447,19 @@ export default function App() {
       const { job_id } = await api.scrapeVideo(videoId, true);
       trackJob(job_id, "scrape_one", null);
       setNotice("刮削任务已开始");
+    } catch (error) {
+      setBanner(errorMessage(error));
+    }
+  }
+
+  // 封面下载失败时用已记录的远端地址重试，不重新执行刮削源。
+  async function refreshVideoCover(videoId: number) {
+    setBanner(null);
+    try {
+      const detail = await api.refreshVideoCover(videoId);
+      setVideoDetail(detail);
+      setRefreshKey((key) => key + 1);
+      setNotice("封面已重新下载");
     } catch (error) {
       setBanner(errorMessage(error));
     }
@@ -714,28 +741,33 @@ export default function App() {
             label="视频"
             active={view === "videos" && videoCategory === "all"}
             count={categoryCounts.all}
+            expanded={videosOpen}
             onClick={() => {
+              // 点「视频」始终回到全部视频，同时展开/收起分类。
               setView("videos");
               setVideoCategory("all");
+              setVideosOpen((open) => !open);
             }}
           />
-          {/* 媒体分类：与目录/源的类型一致，全部视频仍从「视频」进入。 */}
-          <div className="space-y-0.5">
-            {CATEGORY_LABELS.map((item) => (
-              <NavButton
-                key={item.value}
-                icon={<span className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
-                label={item.label}
-                active={view === "videos" && videoCategory === item.value}
-                count={categoryCounts[item.value]}
-                indent
-                onClick={() => {
-                  setView("videos");
-                  setVideoCategory(item.value);
-                }}
-              />
-            ))}
-          </div>
+          {/* 媒体分类折叠在「视频」下，与目录/源的类型一致。 */}
+          {videosOpen && (
+            <div className="space-y-0.5">
+              {CATEGORY_LABELS.map((item) => (
+                <NavButton
+                  key={item.value}
+                  icon={<span className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
+                  label={item.label}
+                  active={view === "videos" && videoCategory === item.value}
+                  count={categoryCounts[item.value]}
+                  indent
+                  onClick={() => {
+                    setView("videos");
+                    setVideoCategory(item.value);
+                  }}
+                />
+              ))}
+            </div>
+          )}
           <NavButton
             icon={<UserIcon className="h-4 w-4" />}
             label="演员"
@@ -746,6 +778,7 @@ export default function App() {
             icon={<HeartIcon className="h-4 w-4" />}
             label="收藏"
             active={view.startsWith("favorites")}
+            expanded={favoritesOpen}
             onClick={() => setFavoritesOpen((open) => !open)}
           />
           {favoritesOpen && (
@@ -1063,6 +1096,7 @@ export default function App() {
           onScrapeSource={(sourceId, reset) =>
             void startVideoScrapeWithSource(selectedVideoId, sourceId, reset)
           }
+          onRefreshCover={() => void refreshVideoCover(selectedVideoId)}
           sources={sources}
           playing={playing}
         />

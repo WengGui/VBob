@@ -186,3 +186,25 @@ def test_source_templates_include_categories(client: TestClient) -> None:
     # 同名源已存在时返回 409；未知模板返回 404。
     assert client.post("/api/sources/templates/tmdb-movie").status_code == 409
     assert client.post("/api/sources/templates/unknown").status_code == 404
+
+
+def test_pick_scan_root_returns_selected_directory(
+    client: TestClient, tmp_path: Path, monkeypatch
+) -> None:
+    """目录选择框返回的路径经过规范化后直接回填。"""
+    picked = tmp_path / "picked"
+    picked.mkdir()
+    monkeypatch.setattr("vbob.api.pick_directory", lambda: str(picked))
+
+    response = client.post("/api/scan-roots/pick")
+    assert response.status_code == 200, response.text
+    assert Path(response.json()["path"]) == picked.resolve()
+
+
+def test_pick_scan_root_cancel_returns_null(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("vbob.api.pick_directory", lambda: None)
+    response = client.post("/api/scan-roots/pick")
+    assert response.status_code == 200
+    assert response.json()["path"] is None

@@ -15,6 +15,7 @@ from fastapi import APIRouter, File, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from . import __version__
+from .dialogs import pick_directory
 from .errors import InvalidError, NotFoundError, PlaybackError
 from .images import MAX_IMAGE_BYTES, download_image, save_cover
 from .jobs import JobManager
@@ -58,6 +59,8 @@ router = APIRouter(prefix="/api")
 log = logging.getLogger(__name__)
 
 SCRAPE_STATUSES = {"pending", "scraping", "success", "failed", "no_match", "skipped_manual"}
+# 封面/截图会随刮削被替换，要求浏览器每次重新校验（未变化时返回 304）。
+IMAGE_CACHE_HEADERS = {"Cache-Control": "no-cache"}
 
 
 def _store(request: Request) -> Store:
@@ -101,6 +104,21 @@ def update_settings(request: Request, patch: dict[str, Any]) -> dict[str, Any]:
 def list_roots(request: Request) -> dict[str, Any]:
     """列出全部扫描目录，含最近扫描状态与当前活动任务。"""
     return {"items": _store(request).list_roots()}
+
+
+@router.post("/scan-roots/pick")
+def pick_scan_root() -> dict[str, Any]:
+    """弹出本机目录选择框，返回用户选择的绝对路径；取消时 path 为 null。
+
+    由后端弹框是因为浏览器无法获取本地目录的真实路径。
+    """
+    selected = pick_directory()
+    if not selected:
+        return {"path": None}
+    resolved = canonical_path(selected)
+    if not Path(resolved).is_dir():
+        raise InvalidError("选择的目录不存在")
+    return {"path": resolved}
 
 
 @router.post("/scan-roots", status_code=201)
@@ -494,7 +512,7 @@ def get_cover(request: Request, video_id: int) -> FileResponse:
     detail = _store(request).get_video(video_id)
     metadata = detail["metadata"] or {}
     path = _data_file(request, metadata.get("cover_local"))
-    return FileResponse(path)
+    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
 
 
 @router.post("/videos/{video_id}/cover")
@@ -531,12 +549,30 @@ def set_video_cover_url(
     return store.update_video_cover(video_id, relative, body.url)
 
 
+@router.post("/videos/{video_id}/cover/refresh")
+def refresh_video_cover(request: Request, video_id: int) -> dict[str, Any]:
+    """用已记录的远端封面地址重新下载封面。
+
+    用于刮削成功但图片下载失败的视频，不需要重新执行所有刮削源。
+    错误：视频不存在 404；没有封面地址或下载失败 422。
+    """
+    store = _store(request)
+    detail = store.get_video(video_id)
+    metadata = detail["metadata"] or {}
+    url = str(metadata.get("cover_url") or "").strip()
+    if not url:
+        raise InvalidError("该视频没有可用的封面地址，请先刮削或手动设置封面")
+    data = download_image(url)
+    relative = save_cover(Path(request.app.state.data_dir), "videos", video_id, data)
+    return store.update_video_cover(video_id, relative, url, mark_manual=False)
+
+
 @router.get("/videos/{video_id}/screenshot")
 def get_screenshot(request: Request, video_id: int) -> FileResponse:
     """返回视频截图文件；视频或截图不存在返回 404。"""
     detail = _store(request).get_video(video_id)
     path = _data_file(request, detail["video"].get("screenshot"))
-    return FileResponse(path)
+    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
 
 
 @router.post("/videos/{video_id}/play")
@@ -686,7 +722,7 @@ def get_actress_cover(request: Request, actress_id: int) -> FileResponse:
     """返回演员封面文件；演员或封面不存在返回 404。"""
     detail = _store(request).get_actress(actress_id)
     path = _data_file(request, detail["actress"].get("cover_local"))
-    return FileResponse(path)
+    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
 
 
 @router.post("/actresses/{actress_id}/cover")

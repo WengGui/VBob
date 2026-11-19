@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -15,6 +16,9 @@ from .errors import InvalidError
 # 单张封面大小上限，防止异常大文件占满磁盘。
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VBob/0.1"
+# CDN 偶发重置连接（WinError 10054），重试几次通常就能成功。
+IMAGE_RETRIES = 3
+IMAGE_BACKOFF_SEC = 0.8
 
 
 def detect_image(data: bytes) -> tuple[str, str] | None:
@@ -29,19 +33,46 @@ def detect_image(data: bytes) -> tuple[str, str] | None:
     return None
 
 
+def _image_variants(url: str) -> list[str]:
+    """主地址之外再准备几个 TMDB 尺寸作为兜底；普通站点只返回原地址。"""
+    variants = [url]
+    if "/t/p/w500/" in url:
+        variants.append(url.replace("/t/p/w500/", "/t/p/w780/", 1))
+        variants.append(url.replace("/t/p/w500/", "/t/p/original/", 1))
+    return variants
+
+
 def download_image(url: str) -> bytes:
     """下载封面并校验协议、大小与图片签名，返回原始字节。"""
     parsed = urlsplit(url)
     # 仅允许 http(s)，避免 file:// 等本地协议被滥用。
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise InvalidError("封面 URL 必须是 http(s) 地址")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            # 多读 1 字节，以便判断内容是否超过上限。
-            data = response.read(MAX_IMAGE_BYTES + 1)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the user
-        raise InvalidError(f"下载封面失败: {exc}") from exc
+    headers = {
+        "User-Agent": USER_AGENT,
+        # 不声明 avif，避免 CDN 返回当前不支持校验的格式。
+        "Accept": "image/webp,image/jpeg,image/png,*/*;q=0.8",
+    }
+    last_error: Exception | None = None
+    data: bytes | None = None
+    # 主地址重试若干次；仍然失败时换 TMDB 的其他尺寸再试，绕过偶发的 CDN 重置。
+    for index, candidate in enumerate(_image_variants(url)):
+        attempts = IMAGE_RETRIES if index == 0 else 1
+        request = urllib.request.Request(candidate, headers=headers)
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    # 多读 1 字节，以便判断内容是否超过上限。
+                    data = response.read(MAX_IMAGE_BYTES + 1)
+                break
+            except Exception as exc:  # noqa: BLE001 - retried, then surfaced
+                last_error = exc
+                if attempt < attempts - 1:
+                    time.sleep(IMAGE_BACKOFF_SEC * (attempt + 1))
+        if data is not None:
+            break
+    if data is None:
+        raise InvalidError(f"下载封面失败: {last_error}") from last_error
     if len(data) > MAX_IMAGE_BYTES:
         raise InvalidError("封面文件过大（上限 10MB）")
     if detect_image(data) is None:

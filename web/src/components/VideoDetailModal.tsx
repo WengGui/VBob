@@ -19,6 +19,7 @@ import {
   formatDate,
   formatDuration,
   formatSize,
+  coverUrl,
   gradient,
   titleOf,
 } from "../format";
@@ -83,6 +84,7 @@ export function VideoDetailModal({
   onDeleteFile,
   onDetachFile,
   onScrapeSource,
+  onRefreshCover,
   sources,
   playing,
 }: {
@@ -103,6 +105,8 @@ export function VideoDetailModal({
   onDetachFile: (fileId: number) => void;
   /** 用指定源重刮；sourceId 为 null 表示恢复自动跟随目录配置。 */
   onScrapeSource: (sourceId: number | null, reset: boolean) => void;
+  /** 用已记录的远端地址重新下载封面（不重新刮削）。 */
+  onRefreshCover: () => void;
   /** 可用源列表，用于详情页切换刮削源。 */
   sources: Source[];
   playing: boolean;
@@ -207,7 +211,7 @@ export function VideoDetailModal({
               <div className="absolute inset-0" style={{ background: gradient(view.id) }} />
               {metadata?.cover_local ? (
                 <img
-                  src={`/api/videos/${view.id}/cover`}
+                  src={coverUrl(view.id, metadata)}
                   alt=""
                   className="absolute inset-0 h-full w-full object-cover"
                   onError={(event) => {
@@ -222,6 +226,17 @@ export function VideoDetailModal({
                 </div>
               )}
             </div>
+
+            {/* 刮削拿到了封面地址但下载失败时，允许直接重试，无需重刮全部源。 */}
+            {metadata?.cover_url && !metadata?.cover_local && (
+              <button
+                type="button"
+                onClick={onRefreshCover}
+                className="mt-2 w-full rounded-lg border border-sky-200 px-3 py-1.5 text-[11px] text-sky-600 transition hover:bg-sky-50 dark:border-sky-500/20 dark:text-sky-300 dark:hover:bg-sky-500/10"
+              >
+                重新下载封面
+              </button>
+            )}
 
             <div className="mt-4 flex items-start justify-between gap-3">
               <div className="min-w-0">

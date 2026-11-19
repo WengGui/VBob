@@ -504,3 +504,34 @@ def test_reset_clears_previous_source_fields(
     assert metadata["title"] == "Source B"
     # 新源没有简介，旧源写入的简介已被清空。
     assert metadata["overview"] is None
+
+
+def test_refresh_cover_uses_stored_url(
+    client: TestClient, tmp_path: Path, mock_site: str
+) -> None:
+    """封面下载失败后可用已记录的远端地址重试，且不标记为手动封面。"""
+    _, video_id = _scan_single_video(
+        client, tmp_path, "One Piece 1999.mp4", category="anime"
+    )
+    store = client.app.state.store
+    with store.db.transaction() as conn:
+        store._ensure_metadata_row(conn, video_id)
+        conn.execute(
+            "UPDATE metadata SET cover_url=?, cover_local=NULL WHERE video_id=?",
+            (f"{mock_site}/poster.jpg", video_id),
+        )
+
+    response = client.post(f"/api/videos/{video_id}/cover/refresh")
+    assert response.status_code == 200, response.text
+    metadata = response.json()["metadata"]
+    assert metadata["cover_local"]
+    # 自动重试不应把封面变成“手动字段”，否则后续刮削无法替换。
+    assert "cover_local" not in metadata["manual_fields"]
+    assert client.get(f"/api/videos/{video_id}/cover").content == PNG
+
+
+def test_refresh_cover_requires_remote_url(client: TestClient, tmp_path: Path) -> None:
+    _, video_id = _scan_single_video(client, tmp_path, "No Cover 2020.mp4")
+    response = client.post(f"/api/videos/{video_id}/cover/refresh")
+    assert response.status_code == 422
+    assert "封面地址" in response.json()["error"]["message"]

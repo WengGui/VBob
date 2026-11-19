@@ -29,16 +29,20 @@ export function RootSettingsModal({
   onClose,
   onSaved,
 }: {
-  root: ScanRoot;
+  /** null 表示新增目录；传入现有目录则为编辑模式。 */
+  root: ScanRoot | null;
   onClose: () => void;
   /** 保存成功后由父组件关闭弹窗、刷新列表并展示提示。 */
   onSaved: (message: string) => void;
 }) {
-  const [path, setPath] = useState(root.path);
-  const [interval, setIntervalValue] = useState(String(root.scan_interval_minutes));
-  const [category, setCategory] = useState(root.category);
+  const isNew = root === null;
+  const [path, setPath] = useState(root?.path ?? "");
+  const [interval, setIntervalValue] = useState(
+    String(root?.scan_interval_minutes ?? 0),
+  );
+  const [category, setCategory] = useState(root?.category ?? "other");
   // 已选源保持用户点击顺序，顺序即刮削顺序。
-  const [selected, setSelected] = useState<number[]>(root.source_ids ?? []);
+  const [selected, setSelected] = useState<number[]>(root?.source_ids ?? []);
   const [sources, setSources] = useState<Source[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -52,12 +56,14 @@ export function RootSettingsModal({
 
   const minutes = interval.trim() === "" ? 0 : Number(interval);
   const intervalValid = Number.isInteger(minutes) && minutes >= 0;
-  const pathChanged = path.trim() !== root.path;
-  const intervalChanged = intervalValid && minutes !== root.scan_interval_minutes;
-  const categoryChanged = category !== root.category;
+  const pathChanged = !isNew && path.trim() !== (root?.path ?? "");
+  const intervalChanged =
+    !isNew && intervalValid && minutes !== (root?.scan_interval_minutes ?? 0);
+  const categoryChanged = !isNew && category !== (root?.category ?? "other");
   const selectedChanged =
-    selected.length !== (root.source_ids ?? []).length ||
-    selected.some((id, index) => id !== (root.source_ids ?? [])[index]);
+    !isNew &&
+    (selected.length !== (root?.source_ids ?? []).length ||
+      selected.some((id, index) => id !== (root?.source_ids ?? [])[index]));
   // 演员源不参与视频刮削，不放在目录限定列表里。
   const selectableSources = sources.filter(
     (source) => source.config.type !== "actress",
@@ -93,6 +99,17 @@ export function RootSettingsModal({
       : `每 ${minutes} 分钟自动扫描一次`
     : "请输入有效的分钟数";
 
+  // 由后端弹出系统目录选择框，避免手动输入完整路径。
+  async function browse() {
+    setError(null);
+    try {
+      const { path: picked } = await api.pickDirectory();
+      if (picked) setPath(picked);
+    } catch (pickError) {
+      setError(errorMessage(pickError));
+    }
+  }
+
   // 路径为空或间隔非法时不提交，错误直接展示在表单内，避免离开弹窗后才发现。
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -106,12 +123,17 @@ export function RootSettingsModal({
       setError("自动扫描间隔必须是 0 或正整数（分钟）");
       return;
     }
-    if (!pathChanged && !intervalChanged && !categoryChanged && !selectedChanged) {
+    if (!isNew && !pathChanged && !intervalChanged && !categoryChanged && !selectedChanged) {
       onClose();
       return;
     }
     setSaving(true);
     try {
+      if (root === null) {
+        await api.createRoot(trimmed, minutes, category, selected);
+        onSaved("目录已添加，可以开始扫描");
+        return;
+      }
       await api.updateRoot(root.id, {
         ...(pathChanged ? { path: trimmed } : {}),
         ...(intervalChanged ? { scan_interval_minutes: minutes } : {}),
@@ -132,8 +154,8 @@ export function RootSettingsModal({
 
   return (
     <Modal
-      title="编辑目录"
-      subtitle={root.path}
+      title={isNew ? "添加目录" : "编辑目录"}
+      subtitle={isNew ? "选择目录并设置媒体类型与刮削源" : (root?.path ?? "")}
       onClose={onClose}
       footer={
         <>
@@ -157,15 +179,17 @@ export function RootSettingsModal({
     >
       <form id="root-settings-form" onSubmit={(event) => void save(event)}>
         {/* 顶部概览：让用户在修改配置时仍能看到该目录的扫描结果。 */}
-        <div className="grid grid-cols-2 gap-2 rounded-xl bg-zinc-50 p-3 sm:grid-cols-4 dark:bg-white/[0.03]">
-          <Stat label="已收录" value={`${root.scanned_count ?? 0} 部`} />
-          <Stat label="文件" value={`${root.file_count ?? root.scanned_count ?? 0} 个`} />
-          <Stat label="已刮削" value={String(root.scraped_count ?? 0)} />
-          <Stat
-            label="自动扫描"
-            value={root.scan_interval_minutes ? `${root.scan_interval_minutes} 分钟` : "关闭"}
-          />
-        </div>
+        {root && (
+          <div className="grid grid-cols-2 gap-2 rounded-xl bg-zinc-50 p-3 sm:grid-cols-4 dark:bg-white/[0.03]">
+            <Stat label="已收录" value={`${root.scanned_count ?? 0} 部`} />
+            <Stat label="文件" value={`${root.file_count ?? root.scanned_count ?? 0} 个`} />
+            <Stat label="已刮削" value={String(root.scraped_count ?? 0)} />
+            <Stat
+              label="自动扫描"
+              value={root.scan_interval_minutes ? `${root.scan_interval_minutes} 分钟` : "关闭"}
+            />
+          </div>
+        )}
 
         <fieldset className="mt-4 rounded-xl border border-zinc-200 p-4 dark:border-white/10">
           <legend className="sr-only">目录路径</legend>
@@ -182,14 +206,23 @@ export function RootSettingsModal({
               </p>
             </div>
           </div>
-          <input
-            autoFocus
-            value={path}
-            onChange={(event) => setPath(event.target.value)}
-            placeholder="D:\Media 或 /media/videos"
-            spellCheck={false}
-            className={`${INPUT} mt-3 font-mono text-xs`}
-          />
+          <div className="mt-3 flex gap-2">
+            <input
+              autoFocus
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="D:\Media 或 /media/videos"
+              spellCheck={false}
+              className={`${INPUT} font-mono text-xs`}
+            />
+            <button
+              type="button"
+              onClick={() => void browse()}
+              className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+            >
+              浏览…
+            </button>
+          </div>
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
             目录被改名/移动时，已有视频会按相对路径迁移；如果只是把扫描范围改成子目录或上级目录，文件不会移动，范围外的记录会标记为缺失。
           </p>
@@ -360,7 +393,7 @@ export function RootSettingsModal({
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
             服务运行期间每 30 秒检查一次，到期且没有正在运行的任务时自动扫描。
-            {root.last_scan_started_at && (
+            {root?.last_scan_started_at && (
               <>
                 {" "}上次扫描：{formatDate(root.last_scan_started_at)}
                 {root.last_scan_duration_ms != null &&

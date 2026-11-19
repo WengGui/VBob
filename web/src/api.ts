@@ -403,6 +403,11 @@ export const api = {
     return request(`/api/videos/${id}/cover`, { method: "POST", body: form });
   },
 
+  /** 用已记录的远端封面地址重新下载，不重新执行刮削源。 */
+  refreshVideoCover(id: number): Promise<VideoDetail> {
+    return request(`/api/videos/${id}/cover/refresh`, { method: "POST" });
+  },
+
   setVideoCoverUrl(id: number, url: string): Promise<VideoDetail> {
     return request(`/api/videos/${id}/cover`, {
       method: "PUT",
@@ -551,6 +556,11 @@ export const api = {
 
   listRoots(): Promise<{ items: ScanRoot[] }> {
     return request("/api/scan-roots");
+  },
+
+  /** 由后端弹出系统目录选择框；取消时 path 为 null。 */
+  pickDirectory(): Promise<{ path: string | null }> {
+    return request("/api/scan-roots/pick", { method: "POST" });
   },
 
   createRoot(

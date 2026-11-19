@@ -10,6 +10,7 @@ import {
   durationOf,
   formatDay,
   formatDuration,
+  coverUrl,
   gradient,
   titleOf,
 } from "../format";
@@ -138,8 +139,8 @@ export function VideoCard({
         <div className="absolute inset-0" style={{ background: gradient(video.id) }} />
         {video.metadata?.cover_local ? (
           <img
-            // 封面由后端按 id 返回本地缓存文件，而不是直接使用远端 URL。
-            src={`/api/videos/${video.id}/cover`}
+            // 封面由后端按 id 返回本地缓存文件；版本参数避免换源后显示旧图。
+            src={coverUrl(video.id, video.metadata)}
             alt=""
             loading="lazy"
             className="absolute inset-0 h-full w-full object-cover"

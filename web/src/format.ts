@@ -101,3 +101,21 @@ export function censoredLabel(value: string | null | undefined): string | null {
   if (value === "uncensored") return "无码";
   return null;
 }
+
+/**
+ * 本地封面 URL。
+ * 带上封面文件名和刮削时间作为版本参数：换源/重新刮削后地址会变化，
+ * 避免浏览器继续显示旧封面。
+ */
+export function coverUrl(
+  videoId: number,
+  metadata:
+    | { cover_local?: string | null; last_scraped_at?: string | null }
+    | null
+    | undefined,
+): string {
+  const version = [metadata?.cover_local, metadata?.last_scraped_at]
+    .filter(Boolean)
+    .join("|");
+  return `/api/videos/${videoId}/cover${version ? `?v=${encodeURIComponent(version)}` : ""}`;
+}

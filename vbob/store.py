@@ -1949,13 +1949,19 @@ class Store:
             self._recompute_video_complete(conn, video_id)
 
     def update_video_cover(
-        self, video_id: int, cover_local: str, cover_url: str | None = None
+        self,
+        video_id: int,
+        cover_local: str,
+        cover_url: str | None = None,
+        *,
+        mark_manual: bool = True,
     ) -> dict[str, Any]:
         """更新视频封面。
 
         ``cover_local`` 是相对数据目录的路径（如 ``covers/videos/1.jpg``）；
         ``cover_url`` 为空时保留原有来源地址，只替换本地封面文件。
-        本地封面会记入手动字段，避免之后的刮削覆盖用户选择。
+        ``mark_manual`` 为真时记入手动字段，避免之后的刮削覆盖用户选择；
+        从刮削地址重新下载时应传 False。
         """
         with self.db.transaction() as conn:
             video = conn.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
@@ -1974,16 +1980,17 @@ class Store:
                     "updated_at=? WHERE video_id=?",
                     (cover_local, cover_url, utc_now(), video_id),
                 )
-            row = conn.execute(
-                "SELECT manual_fields FROM metadata WHERE video_id=?", (video_id,)
-            ).fetchone()
-            current = _json_load(row["manual_fields"], [])
-            if "cover_local" not in current:
-                current.append("cover_local")
-            conn.execute(
-                "UPDATE metadata SET manual_fields=? WHERE video_id=?",
-                (json.dumps(current, ensure_ascii=False), video_id),
-            )
+            if mark_manual:
+                row = conn.execute(
+                    "SELECT manual_fields FROM metadata WHERE video_id=?", (video_id,)
+                ).fetchone()
+                current = _json_load(row["manual_fields"], [])
+                if "cover_local" not in current:
+                    current.append("cover_local")
+                conn.execute(
+                    "UPDATE metadata SET manual_fields=? WHERE video_id=?",
+                    (json.dumps(current, ensure_ascii=False), video_id),
+                )
             self._recompute_video_complete(conn, video_id)
         return self.get_video(video_id)
 

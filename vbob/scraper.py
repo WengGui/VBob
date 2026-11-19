@@ -578,10 +578,14 @@ class Scraper:
                 errors.append(f"演员 {actress['name']} 刮削失败: {exc}")
                 log.warning("actress scrape failed actress=%s: %s", actress["id"], exc)
 
+        message = f"使用 {', '.join(matched_sources)} 更新了 {len(accumulated)} 个字段"
+        # 封面下载和演员补全失败不会让整个刮削失败，但要在任务提示里可见。
+        if errors:
+            message += f"；{errors[0]}"
         return {
             "status": "success",
             "sources": matched_sources,
-            "message": f"使用 {', '.join(matched_sources)} 更新了 {len(accumulated)} 个字段",
+            "message": message,
             "errors": errors,
         }
 
