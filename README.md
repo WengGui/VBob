@@ -41,7 +41,8 @@ VBob 是一个**完全本地运行**的视频库管理工具。它扫描你指�
 **刮削与演员**
 
 - 视频源、查询源、演员源三类刮削源，图形化配置字段提取规则；
-- 内置 **TMDB**（电影/剧集/动漫）与 **Shikimori**（动漫）源模板，一键添加；
+- 内置 **TMDB**（电影/剧集/动漫）、**Shikimori**（动漫）与 **ThePornDB**（欧美成人）源模板，一键添加；
+- 每个源可一键检测网络连通性，用手机信号式的 5 格信号条显示域名可达性与响应速度；
 - 目录可按顺序限定源；视频详情可切换并记住偏好源，支持覆盖式重刮；
 - 支持二次详情请求、源级变量与封面 CDN 前缀，适配 TMDB、Shikimori 等 JSON API；
 - 多源合并、封面下载、逐源日志、单视频重刮、按目录批量刮削；
@@ -162,8 +163,10 @@ git push origin v0.1.0
 | TMDB 剧集 | 剧集 | 中文名、原名、简介、海报、类型、制作公司 | TMDB API Key（v3） |
 | TMDB 动漫 | 动漫 | 中文名、原名、简介、海报、类型、制作公司 | TMDB API Key（v3） |
 | Shikimori 动漫 | 动漫 | 原名、海报、类型、制作公司 | 无 |
+| ThePornDB | 其他 | 欧美成人影片/场景的标题、日期、简介、封面、片商、演员 | ThePornDB API Token |
 
 - TMDB 密钥在 <https://www.themoviedb.org/settings/api> 申请，只保存在本地数据库；
+- ThePornDB 使用 GraphQL 接口，Token 在 <https://theporndb.net/user/api-tokens> 生成（只显示一次）；
 - 模板使用 `api.tmdb.org`，部分网络下 `api.themoviedb.org` 会被 DNS 污染；
 - 本项目使用 TMDB API，但未获得 TMDB 的认可或认证（This product uses the TMDB API but is not endorsed or certified by TMDB）；
 - Shikimori 数据来自 <https://shikimori.one>，限速 1 次/秒；
@@ -222,6 +225,11 @@ assets/              exe 图标
 后端与前端可以在源码模式下运行，目前只提供 Windows 打包产物。
 
 ## 更新日志
+
+### 未发布
+
+- 刮削源支持网络连通性检测：单个或一键检测全部源，用 5 格信号条按响应耗时显示网络质量；
+- 新增 ThePornDB 源模板，刮削引擎支持 POST JSON 请求体与请求头占位符。
 
 ### v0.2.0
 

@@ -109,6 +109,10 @@ def validate_source_config(config: Any) -> dict[str, Any]:
     if method not in {"GET", "POST"}:
         raise InvalidError("request.method 只支持 GET/POST")
     request["method"] = method
+    # POST 请求体：对象/数组会先填充占位符再序列化，字符串则原样发送。
+    body = request.get("body")
+    if body is not None and not isinstance(body, (str, dict, list)):
+        raise InvalidError("request.body 必须是字符串、对象或数组")
 
     extract = data.get("extract")
     _validate_extract(extract, "extract")
@@ -147,6 +151,9 @@ def validate_source_config(config: Any) -> dict[str, Any]:
         if detail_method not in {"GET", "POST"}:
             raise InvalidError("detail.method 只支持 GET/POST")
         detail["method"] = detail_method
+        detail_body = detail.get("body")
+        if detail_body is not None and not isinstance(detail_body, (str, dict, list)):
+            raise InvalidError("detail.body 必须是字符串、对象或数组")
         _validate_extract(detail.get("extract"), "detail.extract")
         data["detail"] = detail
 

@@ -143,6 +143,52 @@ SOURCE_TEMPLATES: list[dict[str, Any]] = [
         ),
     },
     {
+        "key": "theporndb",
+        "name": "ThePornDB",
+        "description": (
+            "欧美成人影片/场景元数据，按标题搜索；需要 ThePornDB API Token。"
+        ),
+        "config": {
+            "name": "ThePornDB",
+            "enabled": True,
+            "priority": 100,
+            "type": "query",
+            "category": "other",
+            "vars": {"api_key": ""},
+            "request": {
+                "url": "https://api.theporndb.net/graphql",
+                "method": "POST",
+                "headers": {
+                    "Authorization": "Bearer {api_key}",
+                    "Accept": "application/json",
+                },
+                # stash-box 兼容的 GraphQL 查询；字段可按实际响应增删。
+                "body": {
+                    "query": (
+                        "query SearchScene($term: String!) { "
+                        "searchScene(term: $term) { id title details date image "
+                        "studio { name } performers { performer { name } } "
+                        "tags { name } } }"
+                    ),
+                    "variables": {"term": "{title}"},
+                },
+                "timeout_ms": 15000,
+                "rate_limit": {"qps": 1},
+            },
+            "extract": {
+                "title": "json: data.searchScene[0].title",
+                "release_date": "json: data.searchScene[0].date",
+                "overview": "json: data.searchScene[0].details",
+                "cover_url": "json: data.searchScene[0].image",
+                "studio": "json: data.searchScene[0].studio.name",
+                "tags": "json: data.searchScene[0].tags[*].name",
+                "actresses": (
+                    "json: data.searchScene[0].performers[*].performer.name"
+                ),
+            },
+        },
+    },
+    {
         "key": "shikimori-anime",
         "name": "Shikimori 动漫",
         "description": "MyAnimeList 镜像，补全原名、海报、类型与制作公司；无需密钥。",

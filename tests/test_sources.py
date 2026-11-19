@@ -119,3 +119,25 @@ def test_default_sources_seed_only_once(tmp_path) -> None:
     assert len(store.list_sources()) == 1
     restored = store.restore_default_sources()
     assert {source["name"] for source in restored} == {"javBus", "javBusActress"}
+
+
+def test_request_body_and_detail_body_are_validated(client: TestClient) -> None:
+    config = valid_config()
+    config["request"]["body"] = {"query": "query { __typename }"}
+    response = client.post("/api/sources", json=config)
+    assert response.status_code == 201, response.text
+    assert response.json()["config"]["request"]["body"] == {
+        "query": "query { __typename }"
+    }
+
+    bad = valid_config()
+    bad["request"]["body"] = 123
+    assert client.post("/api/sources", json=bad).status_code == 422
+
+    bad_detail = valid_config()
+    bad_detail["detail"] = {
+        "url": "https://example.com/graphql",
+        "extract": {"title": "json: title"},
+        "body": 123,
+    }
+    assert client.post("/api/sources", json=bad_detail).status_code == 422

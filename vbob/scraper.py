@@ -175,10 +175,18 @@ class SourceRunner:
         url = self._fill_placeholders(str(request.get("url", "")), values)
         method = str(request.get("method", "GET")).upper()
         headers = dict(DEFAULT_HEADERS)
-        # 源配置的自定义头（如 Referer、Cookie）覆盖默认浏览器头。
-        headers.update(
-            {str(k): str(v) for k, v in (request.get("headers") or {}).items()}
-        )
+        # 源配置的自定义头（如 Referer、Cookie、Authorization）覆盖默认浏览器头；
+        # 头里的 {api_key} 等占位符同样解析，缺失时按跳过该源处理。
+        for key, value in (request.get("headers") or {}).items():
+            text = str(value)
+            if "{" in text:
+                text = _fill_raw(text, values)
+            headers[str(key)] = text
+        content, content_type = self._prepare_body(request, values)
+        if content is not None and not any(
+            key.lower() == "content-type" for key in headers
+        ):
+            headers["Content-Type"] = str(content_type)
         cookies = _parse_cookies(request.get("cookies"))
         timeout = max(1.0, float(request.get("timeout_ms", 10000)) / 1000)
         retries = int((request.get("retry") or {}).get("max", 1))
@@ -200,7 +208,7 @@ class SourceRunner:
                     proxy=proxy,
                     trust_env=False,
                 ) as client:
-                    response = client.request(method, url)
+                    response = client.request(method, url, content=content)
                 if response.status_code >= 400:
                     last_error = f"HTTP {response.status_code}"
                 else:
@@ -289,6 +297,21 @@ class SourceRunner:
             # 详情失败不影响列表结果，但写日志便于排查；不打印 URL 以免泄露密钥。
             log.warning("detail request failed: %s", exc)
             return {}, [], [f"detail: {exc}"]
+
+    @staticmethod
+    def _prepare_body(
+        request: dict[str, Any], values: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        """构造请求体：对象/数组先填充占位符再序列化，避免转义破坏 JSON。"""
+        body = request.get("body")
+        if body is None:
+            return None, None
+        if isinstance(body, str):
+            return _fill_raw(body, values), "application/json"
+        return (
+            json.dumps(_fill_json(body, values), ensure_ascii=False),
+            "application/json",
+        )
 
     @staticmethod
     def _fill_placeholders(template: str, values: dict[str, Any]) -> str:
@@ -934,6 +957,29 @@ def _normalize_date(value: str) -> str:
         return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
     match = re.search(r"(?:19|20)\d{2}", text)
     return match.group(0) if match else text
+
+
+def _fill_raw(template: str, values: dict[str, Any]) -> str:
+    """把占位符替换为原始值（不做 URL 编码），用于请求体和请求头。"""
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = values.get(key)
+        if value is None or value == "":
+            raise _SkipSource(f"缺少占位符 {{{key}}}")
+        return str(value)
+
+    return PLACEHOLDER.sub(replace, template)
+
+
+def _fill_json(value: Any, values: dict[str, Any]) -> Any:
+    """递归填充 JSON 结构中的占位符，返回可直接序列化的新对象。"""
+    if isinstance(value, dict):
+        return {key: _fill_json(item, values) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill_json(item, values) for item in value]
+    if isinstance(value, str):
+        return _fill_raw(value, values)
+    return value
 
 
 def _absolute_url(value: str, base_url: str, config: dict[str, Any]) -> str:

@@ -225,8 +225,22 @@ export interface Source {
   builtin: boolean;
   config: Record<string, unknown>;
   last_test_at: string | null;
+  /** 最近一次连通性检测结果；从未检测时为 null。 */
+  last_test_result: SourceProbe | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 连通性检测结果：level 为 0-5 的信号格数，0 表示不可达。 */
+export interface SourceProbe {
+  source_id?: number;
+  reachable: boolean;
+  level: number;
+  latency_ms: number | null;
+  status_code: number | null;
+  message: string;
+  url: string | null;
+  checked_at: string;
 }
 
 /** 内置源模板：TMDB 需要用户自行填写 API 密钥，Shikimori 无需配置。 */
@@ -669,5 +683,15 @@ export const api = {
     return request(`/api/sources/templates/${encodeURIComponent(key)}`, {
       method: "POST",
     });
+  },
+
+  /** 检测单个源的网络连通性，结果会同时写入数据库。 */
+  probeSource(id: number): Promise<SourceProbe> {
+    return request(`/api/sources/${id}/probe`, { method: "POST" });
+  },
+
+  /** 并发检测全部源，返回顺序与源列表一致。 */
+  probeAllSources(): Promise<{ items: SourceProbe[] }> {
+    return request("/api/sources/probe", { method: "POST" });
   },
 };

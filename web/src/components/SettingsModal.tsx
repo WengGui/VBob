@@ -10,6 +10,7 @@ import {
   type PlayerInfo,
   type ScanRoot,
   type Source,
+  type SourceProbe,
   type SourceTemplate,
 } from "../api";
 import { errorMessage, formatDate, formatDuration } from "../format";
@@ -26,6 +27,7 @@ import {
 import { PlayerSettingsPanel } from "./PlayerSettingsPanel";
 import { RootDeleteModal } from "./RootDeleteModal";
 import { RootSettingsModal } from "./RootSettingsModal";
+import { SignalBars } from "./SignalBars";
 import { SourceForm } from "./SourceForm";
 
 type Tab = "directories" | "players" | "sources";
@@ -63,6 +65,10 @@ export function SettingsModal({
   const [sources, setSources] = useState<Source[]>([]);
   // 内置源模板（TMDB / Shikimori），一键创建后再由用户补全密钥。
   const [templates, setTemplates] = useState<SourceTemplate[]>([]);
+  // 连通性检测结果按源 ID 缓存；打开设置页时用数据库里的上次结果初始化。
+  const [probes, setProbes] = useState<Record<number, SourceProbe>>({});
+  const [probing, setProbing] = useState<Set<number>>(new Set());
+  const [probingAll, setProbingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editor, setEditor] = useState<{ source: Source | null } | null>(null);
@@ -83,7 +89,16 @@ export function SettingsModal({
 
   const loadSources = useCallback(async () => {
     try {
-      setSources((await api.listSources()).items);
+      const items = (await api.listSources()).items;
+      setSources(items);
+      // 后端保存了上次检测结果，重新打开设置时信号条不必重新检测。
+      setProbes((current) => {
+        const next = { ...current };
+        for (const source of items) {
+          if (source.last_test_result) next[source.id] = source.last_test_result;
+        }
+        return next;
+      });
     } catch (loadError) {
       setError(errorMessage(loadError));
     }
@@ -185,6 +200,51 @@ export function SettingsModal({
     } catch (removeError) {
       setError(errorMessage(removeError));
     }
+  }
+
+  // 检测单个源的网络连通性；检测期间对应行的信号条显示脉冲动画。
+  async function probeOne(source: Source) {
+    if (probingAll || probing.has(source.id)) return;
+    setProbing((current) => new Set(current).add(source.id));
+    try {
+      const result = await api.probeSource(source.id);
+      setProbes((current) => ({ ...current, [source.id]: result }));
+    } catch (probeError) {
+      setError(errorMessage(probeError));
+    } finally {
+      setProbing((current) => {
+        const next = new Set(current);
+        next.delete(source.id);
+        return next;
+      });
+    }
+  }
+
+  // 一键检测全部源，结果按 source_id 合并，保持与列表一致的展示。
+  async function probeAll() {
+    if (probingAll) return;
+    setProbingAll(true);
+    try {
+      const { items } = await api.probeAllSources();
+      setProbes((current) => {
+        const next = { ...current };
+        for (const result of items) {
+          if (result.source_id != null) next[result.source_id] = result;
+        }
+        return next;
+      });
+    } catch (probeError) {
+      setError(errorMessage(probeError));
+    } finally {
+      setProbingAll(false);
+    }
+  }
+
+  // 信号条右侧的文字：可达显示耗时，不可达显示“不可达”，未检测显示“检测”。
+  function probeText(result: SourceProbe | null): string {
+    if (!result) return "检测";
+    if (!result.reachable) return "不可达";
+    return result.latency_ms != null ? `${result.latency_ms} ms` : "可达";
   }
 
   // 活动任务优先于上次扫描结果：有 active_job 时按任务类型显示“扫描中/刮削中”。
@@ -416,9 +476,18 @@ export function SettingsModal({
               <div>
                 <div className="mb-4 flex items-center justify-between">
                   <p className="text-xs text-zinc-500">
-                    支持视频源与演员源；优先级越小越先执行。
+                    支持视频源与演员源；优先级越小越先执行。点击信号条可检测该源网络是否可达。
                   </p>
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void probeAll()}
+                      disabled={probingAll || sources.length === 0}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-100 disabled:opacity-40 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
+                    >
+                      <SignalBars level={null} busy={probingAll} />
+                      检测全部
+                    </button>
                     <button
                       type="button"
                       onClick={() => void restoreSources()}
@@ -473,7 +542,10 @@ export function SettingsModal({
                   </div>
                 ) : (
                   <ul className="divide-y divide-zinc-100 dark:divide-white/5">
-                    {sources.map((source) => (
+                    {sources.map((source) => {
+                      const probe = probes[source.id] ?? null;
+                      const busy = probing.has(source.id);
+                      return (
                       <li key={source.id} className="flex flex-wrap items-center gap-3 py-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
@@ -505,6 +577,29 @@ export function SettingsModal({
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5">
+                          {/* 信号条按钮：亮起的格数表示网络质量，点击重新检测。 */}
+                          <button
+                            type="button"
+                            onClick={() => void probeOne(source)}
+                            disabled={probingAll || busy}
+                            title={
+                              probe
+                                ? `${probe.message}\n检测时间：${formatDate(probe.checked_at)}`
+                                : "点击检测该源的网络连通性"
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-[11px] hover:bg-zinc-100 disabled:opacity-60 dark:border-white/10 dark:hover:bg-white/5"
+                          >
+                            <SignalBars level={probe?.level ?? null} busy={busy} />
+                            <span
+                              className={
+                                probe && !probe.reachable
+                                  ? "text-red-600 dark:text-red-400"
+                                  : "text-zinc-500 dark:text-zinc-400"
+                              }
+                            >
+                              {busy ? "检测中" : probeText(probe)}
+                            </span>
+                          </button>
                           <button
                             type="button"
                             onClick={() => void toggleSource(source)}
@@ -539,7 +634,8 @@ export function SettingsModal({
                           </button>
                         </div>
                       </li>
-                    ))}
+                      );
+                    })}
                   </ul>
                 )}
               </div>

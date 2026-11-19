@@ -49,8 +49,27 @@ DETAIL_JSON = {
     "production_companies": [{"name": "Studio A"}],
     "production_countries": [{"name": "中国"}],
 }
+# GraphQL 接口用于验证 POST JSON 请求体与 Authorization 头。
+GRAPHQL_RESPONSE = {
+    "data": {
+        "searchScene": [
+            {
+                "title": "GraphQL Movie",
+                "details": "GraphQL overview",
+                "date": "2024-05-06",
+                # 根相对路径，验证会按接口地址补全并下载到本地。
+                "image": "/poster.jpg",
+                "studio": {"name": "GraphQL Studio"},
+                "performers": [{"performer": {"name": "演员X"}}],
+                "tags": [{"name": "标签Y"}],
+            }
+        ]
+    }
+}
 # 记录测试期间的请求路径，用于断言源顺序与是否真的发起了请求。
 REQUESTS: list[str] = []
+# 记录 POST 的请求体与认证头。
+POST_REQUESTS: list[dict] = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,6 +109,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self) -> None:  # noqa: N802
+        split = urlsplit(self.path)
+        path = unquote(split.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        REQUESTS.append(path)
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else None
+        except json.JSONDecodeError:
+            payload = None
+        POST_REQUESTS.append(
+            {
+                "path": path,
+                "body": payload,
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
+        if path == "/graphql":
+            body = json.dumps(GRAPHQL_RESPONSE, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+        else:
+            body = b"not found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
 
@@ -97,6 +145,7 @@ class Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def mock_site():
     REQUESTS.clear()
+    POST_REQUESTS.clear()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -535,3 +584,81 @@ def test_refresh_cover_requires_remote_url(client: TestClient, tmp_path: Path) -
     response = client.post(f"/api/videos/{video_id}/cover/refresh")
     assert response.status_code == 422
     assert "封面地址" in response.json()["error"]["message"]
+
+
+def test_post_json_body_and_authorization_header(
+    client: TestClient, tmp_path: Path, mock_site: str
+) -> None:
+    """POST JSON 请求体、占位符替换和请求头里的密钥都应生效。"""
+    _, video_id = _scan_single_video(client, tmp_path, "GraphQL Movie 2026.mp4")
+    source = {
+        "name": "graphql-source",
+        "type": "query",
+        "category": "other",
+        "vars": {"api_key": "secret-token"},
+        "request": {
+            "url": f"{mock_site}/graphql",
+            "method": "POST",
+            "headers": {"Authorization": "Bearer {api_key}"},
+            "body": {
+                "query": (
+                    "query SearchScene($term: String!) "
+                    "{ searchScene(term: $term) { title } }"
+                ),
+                "variables": {"term": "{title}"},
+            },
+            "timeout_ms": 5000,
+        },
+        "extract": {
+            "title": "json: data.searchScene[0].title",
+            "overview": "json: data.searchScene[0].details",
+            "cover_url": "json: data.searchScene[0].image",
+            "studio": "json: data.searchScene[0].studio.name",
+            "tags": "json: data.searchScene[0].tags[*].name",
+            "actresses": "json: data.searchScene[0].performers[*].performer.name",
+        },
+    }
+    assert client.post("/api/sources", json=source).status_code == 201
+
+    response = client.post(f"/api/videos/{video_id}/scrape", json={"force": True})
+    wait_job(client, response.json()["job_id"])
+    detail = client.get(f"/api/videos/{video_id}").json()
+    metadata = detail["metadata"]
+    assert metadata["title"] == "GraphQL Movie"
+    assert metadata["overview"] == "GraphQL overview"
+    assert metadata["studio"] == "GraphQL Studio"
+    assert metadata["tags"] == ["标签Y"]
+    assert {item["name"] for item in detail["actresses"]} == {"演员X"}
+    assert client.get(f"/api/videos/{video_id}/cover").content == PNG
+
+    posted = next(item for item in POST_REQUESTS if item["path"] == "/graphql")
+    assert posted["authorization"] == "Bearer secret-token"
+    assert posted["body"]["variables"]["term"] == "GraphQL Movie"
+
+
+def test_missing_api_key_skips_source_before_request(
+    tmp_path: Path,
+) -> None:
+    """请求头里的密钥为空时直接跳过，不发起网络请求。"""
+    from vbob.scraper import SourceRunner
+
+    runner = SourceRunner(tmp_path)
+    source = {
+        "name": "no-key",
+        "config": {
+            "name": "no-key",
+            "type": "query",
+            "category": "other",
+            "vars": {"api_key": ""},
+            "request": {
+                "url": "https://example.com/graphql",
+                "method": "POST",
+                "headers": {"Authorization": "Bearer {api_key}"},
+                "body": {"query": "query { __typename }"},
+            },
+            "extract": {"title": "json: data.title"},
+        },
+    }
+    result, error = runner.run(source, {"title": "x"})
+    assert result is None
+    assert error is not None and "api_key" in error

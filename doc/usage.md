@@ -233,6 +233,21 @@ http://127.0.0.1:8080/?theme=dark
 - 保存时会做结构校验；内置源只能启用/禁用或调优先级，不能编辑/删除。
 - 刮削执行按当前顺序逐源合并，手动编辑过的字段不会被覆盖；封面 URL 会自动下载到本地。
 - 每次源尝试都会写入刮削日志，可在视频详情的「刮削日志」中查看成功/失败原因。
+- **网络连通性检测**：设置 → 刮削源中每个源都有一个 5 格信号条，点击即探测该源站点的域名；
+  右上角「检测全部」会并发检测所有源（最多同时 5 个）。亮起的格数按响应耗时划分：
+
+  | 信号 | 耗时 | 含义 |
+  |------|------|------|
+  | 5 格 | ≤ 300 ms | 很快 |
+  | 4 格 | ≤ 800 ms | 正常 |
+  | 3 格 | ≤ 1.5 s | 偏慢 |
+  | 2 格 | ≤ 3 s | 很慢 |
+  | 1 格 | > 3 s | 勉强可用 |
+  | 0 格 | — | 超时 / DNS 失败 / 无法连接 |
+
+  检测只请求源地址的根路径（`scheme://host/`），不依赖番号或标题；返回 4xx/5xx 也算“可达”，
+  状态码与耗时显示在信号条右侧和鼠标悬停提示里。结果会写入 `sources.last_test_result_json`，
+  下次打开设置页仍显示上次的信号；地址整段由上游提供的源（如演员源的 `{actress_url}`）没有固定域名，会提示无法检测。
 
 **内置模板（TMDB / Shikimori）**
 
@@ -244,16 +259,19 @@ http://127.0.0.1:8080/?theme=dark
 | TMDB 剧集 | 剧集 | 中文名、原名、简介、海报、类型、制作公司 | API 密钥 |
 | TMDB 动漫 | 动漫 | 中文名、原名、简介、海报、类型、制作公司 | API 密钥 |
 | Shikimori 动漫 | 动漫 | 原名、海报、类型、制作公司（MyAnimeList 镜像） | 无 |
+| ThePornDB | 其他 | 欧美成人影片/场景：标题、日期、简介、封面、片商、演员、标签 | API Token |
 
 - TMDB 密钥申请：登录 <https://www.themoviedb.org> → Settings → API → 复制 **API Key（v3 auth）** 的 32 位字符串。创建模板后点源的「编辑」，填入「API 密钥」即可，对应配置项为 `vars.api_key`，URL 中用 `{api_key}` 引用。密钥只保存在本地数据库。
 - 模板使用 `api.tmdb.org` 域名：部分网络下 `api.themoviedb.org` 会被 DNS 污染而超时。
 - Shikimori 的简介是俄文，因此模板不提取简介；中文简介由 TMDB 提供。
+- ThePornDB 使用 GraphQL 接口：注册 <https://theporndb.net/register> 后，在 <https://theporndb.net/user/api-tokens> 生成只读 Token（只显示一次），填入源的「API 密钥」。请求头会自动带上 `Authorization: Bearer {api_key}`。
 - 同一媒体类型的多个源按执行顺序合并：TMDB 在前提供中文，Shikimori 在后兜底。
 
 **高级请求配置**
 
 除界面展示的字段外，源配置还支持：
 
+- `request.body`：POST 请求体。可写 JSON 对象或数组，值里的占位符会先填充再序列化（避免转义破坏 JSON）；字符串则原样发送并填充占位符。请求头里的 `{api_key}` 等占位符同样会替换。
 - `detail`：第二次请求。用第一次提取到的字段拼 URL，适合“先搜索、再查详情”的接口。
   - 以 `_` 开头的字段只作为中间变量（如 `_tmdb_id`），不会写入元数据。
   - 详情请求默认沿用主请求的请求头、超时和限流设置，可单独覆盖。
@@ -412,6 +430,8 @@ POST   /api/videos/{id}/detach-files    {file_ids:[...]} 文件移出剧集
 POST   /api/videos/{id}/delete-files    {file_ids:[...]} 彻底删除文件
 POST   /api/scan-roots/{id}/delete      {delete_files} 删除目录数据/文件
 POST   /api/sources/restore-defaults    补齐默认刮削源
+POST   /api/sources/{id}/probe          检测单个源连通性，返回 level(0-5)/latency_ms/status_code
+POST   /api/sources/probe               并发检测全部源，返回 {items:[{source_id, ...}]}
 
 GET    /api/actresses?complete=&favorite=&q=
 GET    /api/actresses/{id}              详情 + 关联视频

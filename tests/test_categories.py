@@ -208,3 +208,13 @@ def test_pick_scan_root_cancel_returns_null(
     response = client.post("/api/scan-roots/pick")
     assert response.status_code == 200
     assert response.json()["path"] is None
+
+
+def test_source_templates_include_theporndb(client: TestClient) -> None:
+    items = client.get("/api/sources/templates").json()["items"]
+    tpdb = next(item for item in items if item["key"] == "theporndb")
+    config = tpdb["config"]
+    assert config["request"]["method"] == "POST"
+    assert "searchScene" in config["request"]["body"]["query"]
+    assert config["request"]["headers"]["Authorization"] == "Bearer {api_key}"
+    assert config["vars"]["api_key"] == ""

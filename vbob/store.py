@@ -660,11 +660,26 @@ class Store:
             )
         return self.get_source(source_id)
 
+    def save_source_probe(self, source_id: int, result: dict[str, Any]) -> dict[str, Any]:
+        """记录一次连通性检测结果；不修改 updated_at，避免看起来像配置被改过。"""
+        checked_at = str(result.get("checked_at") or utc_now())
+        with self.db.connection() as conn:
+            cur = conn.execute(
+                "UPDATE sources SET last_test_at=?, last_test_result_json=? WHERE id=?",
+                (checked_at, json.dumps(result, ensure_ascii=False), source_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("刮削源不存在")
+        return self.get_source(source_id)
+
     @staticmethod
     def _source_dict(row: Any) -> dict[str, Any]:
         """展开源记录的 config_json，并转换布尔列。"""
         data = _row_dict(row)
         data["config"] = _json_load(data.pop("config_json", None), {})
+        data["last_test_result"] = _json_load(
+            data.pop("last_test_result_json", None), None
+        )
         data["enabled"] = bool(data["enabled"])
         data["builtin"] = bool(data["builtin"])
         return data

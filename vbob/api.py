@@ -27,6 +27,7 @@ from .player import (
     players_payload,
     resolve_player,
 )
+from .probe import probe_source, probe_sources
 from .scans import start_scan
 from .scrape_jobs import (
     start_actress_scrape,
@@ -330,6 +331,32 @@ def delete_source(request: Request, source_id: int) -> Response:
     """
     _store(request).delete_source(source_id)
     return Response(status_code=204)
+
+
+@router.post("/sources/probe")
+def probe_all_sources(request: Request) -> dict[str, Any]:
+    """并发检测全部源的网络连通性，并记录每源最近一次结果。
+
+    返回的 ``level`` 为 0-5 的信号格数，供设置页用信号条展示。
+    """
+    store = _store(request)
+    sources = store.list_sources()
+    results = probe_sources([source["config"] for source in sources])
+    items = []
+    for source, result in zip(sources, results):
+        store.save_source_probe(source["id"], result)
+        items.append({"source_id": source["id"], **result})
+    return {"items": items}
+
+
+@router.post("/sources/{source_id}/probe")
+def probe_one_source(request: Request, source_id: int) -> dict[str, Any]:
+    """检测单个源的网络连通性；源不存在返回 404。"""
+    store = _store(request)
+    source = store.get_source(source_id)
+    result = probe_source(source["config"])
+    store.save_source_probe(source_id, result)
+    return {"source_id": source_id, **result}
 
 
 # ----------------------------------------------------------------------- videos
