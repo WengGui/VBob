@@ -34,6 +34,9 @@ dist/
 *.spec
 /VBob.exe
 
+# 文档截图：README 使用脱敏后的 主页示例.png，原始截图不进仓库
+doc/主页.png
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db

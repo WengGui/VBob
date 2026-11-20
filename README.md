@@ -9,16 +9,25 @@
 </p>
 
 <p align="center">
+  <b>English</b>: A local-first video library manager for Windows — scan local folders,
+  scrape metadata from configurable sources (TMDB, Shikimori, JavBus), browse a poster wall,
+  and play with mpv/VLC. No account, no cloud, all data stays on your machine.
+</p>
+
+<p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows&logoColor=white">
   <a href="https://github.com/WengGui/VBob/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/WengGui/VBob/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/WengGui/VBob/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/WengGui/VBob"></a>
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
 ## 简介
 
 VBob 是一个**完全本地运行**的视频库管理工具。它扫描你指定的目录，从文件名中提取番号、标题、年份和集数，通过可配置的刮削源补全元数据，最后以海报墙的形式浏览、筛选和播放。
+
+支持电影、动漫、剧集与 JAV 等媒体分类；元数据可来自 **TMDB、Shikimori、ThePornDB、JavBus** 等内置模板，也可以按 CSS / XPath / JSON / 正则规则接入任意站点。
 
 - **本地优先**：数据库、封面、日志都保存在本机 `data/`，不需要账号或云服务；
 - **开箱即用**：Windows 用户下载解压后双击 `VBob.exe` 即可，无需安装 Python 或 Node.js；
@@ -42,7 +51,7 @@ VBob 是一个**完全本地运行**的视频库管理工具。它扫描你指�
 **刮削与演员**
 
 - 视频源、查询源、演员源三类刮削源，图形化配置字段提取规则；
-- 内置 **TMDB**（电影/剧集/动漫）、**Shikimori**（动漫）与 **ThePornDB**（欧美成人）源模板，一键添加；
+- 内置 **JavBus**（JAV）、**TMDB**（电影/剧集/动漫）、**Shikimori**（动漫）与 **ThePornDB**（欧美成人）源模板，一键添加；
 - 每个源可一键检测网络连通性，用手机信号式的 5 格信号条显示域名可达性与响应速度；
 - 目录可按顺序限定源；视频详情可切换并记住偏好源，支持覆盖式重刮；
 - 支持二次详情请求、源级变量与封面 CDN 前缀，适配 TMDB、Shikimori 等 JSON API；
@@ -59,6 +68,12 @@ VBob 是一个**完全本地运行**的视频库管理工具。它扫描你指�
 - 视频详情支持全字段编辑、封面本地上传或 URL、完整度提示；
 - 调用本地播放器，多文件时弹窗选择具体文件；
 - 删除时可选择仅删记录或同时删除磁盘文件。
+
+## 界面预览
+
+| 海报墙（海报可拖动合并为剧集） | 自定义刮削源 |
+| :---: | :---: |
+| <img src="doc/主页示例.png" alt="VBob 海报墙" width="760"> | <img src="doc/自定义刮削源.png" alt="VBob 刮削源配置" width="500"> |
 
 ## 下载
 
