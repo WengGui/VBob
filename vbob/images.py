@@ -17,7 +17,7 @@ from .errors import InvalidError
 
 # 单张封面大小上限，防止异常大文件占满磁盘。
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VBob/0.3"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VBob/0.4"
 # CDN 偶发重置连接（WinError 10054），重试几次通常就能成功。
 IMAGE_RETRIES = 3
 IMAGE_BACKOFF_SEC = 0.8
