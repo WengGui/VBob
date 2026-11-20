@@ -174,11 +174,22 @@ def test_invalid_category_values_are_rejected(client: TestClient, tmp_path: Path
 def test_source_templates_include_categories(client: TestClient) -> None:
     items = client.get("/api/sources/templates").json()["items"]
     by_key = {item["key"]: item for item in items}
-    assert {"tmdb-movie", "tmdb-series", "tmdb-anime", "shikimori-anime"} <= set(by_key)
+    assert {
+        "javbus",
+        "javbus-actress",
+        "tmdb-movie",
+        "tmdb-series",
+        "tmdb-anime",
+        "shikimori-anime",
+    } <= set(by_key)
     assert by_key["tmdb-movie"]["config"]["category"] == "movie"
     assert by_key["tmdb-anime"]["config"]["category"] == "anime"
     assert by_key["shikimori-anime"]["config"]["category"] == "anime"
     assert by_key["tmdb-movie"]["config"]["vars"]["api_key"] == ""
+    # 首次启动的默认 JAV 源同样以模板形式提供。
+    assert by_key["javbus"]["name"] == "javBus"
+    assert by_key["javbus"]["config"]["category"] == "jav"
+    assert by_key["javbus-actress"]["config"]["type"] == "actress"
 
     created = client.post("/api/sources/templates/tmdb-movie")
     assert created.status_code == 201, created.text

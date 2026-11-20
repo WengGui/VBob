@@ -21,7 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .db import utc_now
-from .scraper import DEFAULT_HEADERS, _SkipSource, _fill_raw, _parse_cookies
+from .http_utils import DEFAULT_HEADERS, SkipSource, fill_raw, parse_cookies
 
 # 未配置超时时使用的探测超时（秒）；配置值上限为 15 秒，避免设置页长时间转圈。
 DEFAULT_PROBE_TIMEOUT = 8.0
@@ -62,8 +62,8 @@ def probe_source(config: dict[str, Any]) -> dict[str, Any]:
         text = str(value)
         if "{" in text:
             try:
-                text = _fill_raw(text, values)
-            except _SkipSource:
+                text = fill_raw(text, values)
+            except SkipSource:
                 # 缺少密钥等占位符时跳过该头，其他头仍可完成连通性判断。
                 continue
         headers[str(key)] = text
@@ -76,7 +76,7 @@ def probe_source(config: dict[str, Any]) -> dict[str, Any]:
             follow_redirects=True,
             timeout=timeout,
             headers=headers,
-            cookies=_parse_cookies(request.get("cookies")),
+            cookies=parse_cookies(request.get("cookies")),
             proxy=proxy,
             trust_env=False,
         ) as client:

@@ -90,7 +90,13 @@ def create_app(
         # 先完成数据库迁移，再让 Store 访问表结构。
         db = Database(resolved_data_dir / "vbob.db")
         db.migrate()
-        store = Store(db)
+        # 传入数据目录，删除记录时才能同步清理封面/截图文件。
+        store = Store(db, resolved_data_dir)
+        # 启动时清理旧版本删除记录后遗留的孤儿图片；失败只记日志。
+        try:
+            store.cleanup_unused_images()
+        except Exception:  # noqa: BLE001 - 清理失败不影响启动
+            log.warning("failed to clean unused images", exc_info=True)
         # 升级兼容：先补齐旧数据的剧集特征，再把重复番号/剧集记录合并为影片分组。
         backfilled = store.backfill_episode_features()
         if backfilled:

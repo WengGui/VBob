@@ -1,4 +1,4 @@
-"""封面下载的重试与校验测试。"""
+"""封面下载的重试、尺寸兜底与校验测试。"""
 
 from __future__ import annotations
 
@@ -14,33 +14,19 @@ PNG = base64.b64decode(
 )
 
 
-class FakeResponse:
-    def __init__(self, data: bytes) -> None:
-        self.data = data
-
-    def read(self, size: int) -> bytes:
-        return self.data
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *exc: object) -> bool:
-        return False
-
-
 def test_download_image_retries_connection_reset(monkeypatch) -> None:
     """CDN 偶发重置连接时应当重试，而不是直接放弃封面。"""
     import vbob.images as images
 
-    calls: list[int] = []
+    calls: list[str] = []
 
-    def fake_urlopen(request, timeout):  # noqa: ANN001
-        calls.append(1)
+    def fake_fetch(url: str, proxy: str | None) -> bytes:
+        calls.append(url)
         if len(calls) < 3:
             raise OSError("[WinError 10054] 远程主机强迫关闭了一个现有的连接")
-        return FakeResponse(PNG)
+        return PNG
 
-    monkeypatch.setattr(images.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(images, "_fetch_once", fake_fetch)
     monkeypatch.setattr(images.time, "sleep", lambda _: None)
 
     assert download_image("https://example.com/poster.jpg") == PNG
@@ -53,13 +39,13 @@ def test_download_image_falls_back_to_other_size(monkeypatch) -> None:
 
     calls: list[str] = []
 
-    def fake_urlopen(request, timeout):  # noqa: ANN001
-        calls.append(request.full_url)
-        if "/t/p/w500/" in request.full_url:
+    def fake_fetch(url: str, proxy: str | None) -> bytes:
+        calls.append(url)
+        if "/t/p/w500/" in url:
             raise OSError("reset")
-        return FakeResponse(PNG)
+        return PNG
 
-    monkeypatch.setattr(images.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(images, "_fetch_once", fake_fetch)
     monkeypatch.setattr(images.time, "sleep", lambda _: None)
 
     data = download_image("https://image.tmdb.org/t/p/w500/poster.jpg")
@@ -69,13 +55,28 @@ def test_download_image_falls_back_to_other_size(monkeypatch) -> None:
     assert len(calls) == 4
 
 
+def test_download_image_passes_source_proxy(monkeypatch) -> None:
+    """源配置的代理需要传递给图片下载，保证走同一网络出口。"""
+    import vbob.images as images
+
+    seen: list[str | None] = []
+
+    def fake_fetch(url: str, proxy: str | None) -> bytes:
+        seen.append(proxy)
+        return PNG
+
+    monkeypatch.setattr(images, "_fetch_once", fake_fetch)
+    assert download_image("https://example.com/poster.jpg", proxy="http://127.0.0.1:7890") == PNG
+    assert seen == ["http://127.0.0.1:7890"]
+
+
 def test_download_image_gives_up_after_retries(monkeypatch) -> None:
     import vbob.images as images
 
-    def fake_urlopen(request, timeout):  # noqa: ANN001
+    def fake_fetch(url: str, proxy: str | None) -> bytes:
         raise OSError("reset")
 
-    monkeypatch.setattr(images.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(images, "_fetch_once", fake_fetch)
     monkeypatch.setattr(images.time, "sleep", lambda _: None)
 
     with pytest.raises(InvalidError, match="下载封面失败"):
@@ -85,9 +86,14 @@ def test_download_image_gives_up_after_retries(monkeypatch) -> None:
 def test_download_image_rejects_oversized(monkeypatch) -> None:
     import vbob.images as images
 
-    def fake_urlopen(request, timeout):  # noqa: ANN001
-        return FakeResponse(b"x" * (MAX_IMAGE_BYTES + 1))
+    def fake_fetch(url: str, proxy: str | None) -> bytes:
+        return b"x" * (MAX_IMAGE_BYTES + 1)
 
-    monkeypatch.setattr(images.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(images, "_fetch_once", fake_fetch)
     with pytest.raises(InvalidError, match="过大"):
         download_image("https://example.com/poster.jpg")
+
+
+def test_download_image_rejects_non_http_url() -> None:
+    with pytest.raises(InvalidError, match="http"):
+        download_image("file:///etc/passwd")

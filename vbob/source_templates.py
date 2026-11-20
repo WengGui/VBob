@@ -5,6 +5,7 @@
 之后可以自由编辑或删除。
 
 说明：
+- javBus / javBusActress 复用首次启动写入的默认源配置，删除后可从模板重新添加；
 - TMDB 使用 ``api.tmdb.org`` 备用域名，部分网络下 ``api.themoviedb.org``
   会被 DNS 污染而无法访问；
 - Shikimori 是 MyAnimeList 的镜像，无需密钥，但要求可识别的 User-Agent。
@@ -15,6 +16,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .default_sources import DEFAULT_SOURCES
 from .errors import NotFoundError
 
 SHIKIMORI_UA = "WengGui/VBob (https://github.com/WengGui/VBob)"
@@ -99,7 +101,33 @@ def _tmdb_config(
     }
 
 
+def _default_source(name: str) -> dict[str, Any]:
+    """按名称取首次启动写入的默认源配置（深拷贝），供模板复用。"""
+    for source in DEFAULT_SOURCES:
+        if source["name"] == name:
+            return deepcopy(source)
+    raise KeyError(f"默认源不存在: {name}")
+
+
 SOURCE_TEMPLATES: list[dict[str, Any]] = [
+    {
+        "key": "javbus",
+        "name": "javBus",
+        "description": (
+            "JAV 番号源：按番号抓取标题、发行日期、演员、标签、封面、时长与厂商；"
+            "无需密钥，站点域名变化时可在编辑中修改 URL。"
+        ),
+        "config": _default_source("javBus"),
+    },
+    {
+        "key": "javbus-actress",
+        "name": "javBusActress",
+        "description": (
+            "JAV 演员资料源：补全生日、身高、三围、罩杯与封面；"
+            "使用视频源提取到的演员资料页链接，需与番号源配合。"
+        ),
+        "config": _default_source("javBusActress"),
+    },
     {
         "key": "tmdb-movie",
         "name": "TMDB 电影",

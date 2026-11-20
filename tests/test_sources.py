@@ -141,3 +141,20 @@ def test_request_body_and_detail_body_are_validated(client: TestClient) -> None:
         "body": 123,
     }
     assert client.post("/api/sources", json=bad_detail).status_code == 422
+
+
+def test_default_sources_are_available_as_templates(client: TestClient) -> None:
+    """首次启动的两个 JAV 默认源应能从模板重新添加，配置与预置完全一致。"""
+    from vbob.default_sources import DEFAULT_SOURCES
+
+    items = client.get("/api/sources/templates").json()["items"]
+    by_name = {item["name"]: item for item in items}
+    for default in DEFAULT_SOURCES:
+        assert by_name[default["name"]]["config"] == default
+
+    created = client.post("/api/sources/templates/javbus")
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == "javBus"
+    assert created.json()["category"] == "jav"
+    # 同名源已存在时重复添加返回 409。
+    assert client.post("/api/sources/templates/javbus").status_code == 409

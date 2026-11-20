@@ -7,12 +7,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   api,
-  CATEGORY_LABELS,
-  type Actress,
   type ActressDetail,
   type Job,
   type Source,
-  type Video,
   type VideoDetail,
   type VideoFile,
 } from "./api";
@@ -22,114 +19,24 @@ import { ActressEditModal } from "./components/ActressEditModal";
 import { DeleteVideoModal } from "./components/DeleteVideoModal";
 import { VideoDetailModal } from "./components/VideoDetailModal";
 import { VideoFilePicker } from "./components/VideoFilePicker";
+import { FilterChip } from "./components/FilterChip";
 import { JobBar } from "./components/JobBar";
 import { SettingsModal } from "./components/SettingsModal";
+import { Sidebar } from "./components/Sidebar";
 import { VideoCard } from "./components/VideoCard";
 import { VideoEditModal } from "./components/VideoEditModal";
-import {
-  ChevronDownIcon,
-  FilmIcon,
-  HeartIcon,
-  MoonIcon,
-  SearchIcon,
-  ShuffleIcon,
-  SettingsIcon,
-  SunIcon,
-  UserIcon,
-} from "./components/Icons";
+import { FilmIcon, SearchIcon, ShuffleIcon, UserIcon } from "./components/Icons";
+import { useLibraryList } from "./hooks/useLibraryList";
 import { errorMessage } from "./format";
 import { applyTheme, readTheme, type Theme } from "./theme";
-
-const PAGE_SIZE = 60;
-
-/** 随机排序种子，避开 0，保证后端乘法散列能打乱顺序。 */
-function newRandomSeed(): number {
-  return Math.floor(Math.random() * 2_147_483_646) + 1;
-}
-// 收藏视图复用同一套列表请求，仅额外携带 favorite 参数。
-type View = "videos" | "actresses" | "favorites-videos" | "favorites-actresses";
-
-// 排序值直接使用后端字段名，作为下拉框的 value 传给接口。
-const VIDEO_SORTS = [
-  ["updated_at", "加入时间：近→远"],
-  ["filename", "文件名"],
-  ["year", "年份"],
-  ["code", "番号"],
-  ["random", "随机顺序"],
-] as const;
-const ACTRESS_SORTS = [
-  ["video_count", "作品数：多→少"],
-  ["name", "姓名"],
-  ["birth_date", "出生日期"],
-] as const;
-
-/** 当前筛选条件的小标签，点击 × 单独清除。 */
-function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-white px-2 py-0.5 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">
-      {label}
-      <button
-        type="button"
-        onClick={onClear}
-        className="rounded px-0.5 text-sky-500 hover:bg-sky-100 hover:text-sky-700 dark:hover:bg-sky-500/20"
-        aria-label={`清除筛选：${label}`}
-      >
-        ×
-      </button>
-    </span>
-  );
-}
-
-/** 侧栏导航按钮；窄屏只显示图标，indent 用于收藏类子项缩进。 */
-function NavButton({
-  icon,
-  label,
-  active,
-  onClick,
-  indent = false,
-  count,
-  expanded,
-}: {
-  icon: ReactNode;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  indent?: boolean;
-  /** 右侧数量角标；undefined 表示不显示。 */
-  count?: number;
-  /** 可折叠项传入当前展开状态，右侧显示旋转箭头；undefined 表示不可折叠。 */
-  expanded?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      className={`flex w-full items-center gap-3 rounded-lg py-2 text-sm transition ${
-        indent ? "pl-6 pr-3" : "px-3"
-      } ${
-        active
-          ? "bg-sky-50 font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-300"
-          : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-white/5"
-      }`}
-    >
-      {icon}
-      <span className="hidden min-w-0 flex-1 truncate text-left lg:inline">{label}</span>
-      {count !== undefined && (
-        <span className="hidden shrink-0 rounded bg-zinc-100 px-1.5 text-[10px] text-zinc-500 lg:inline dark:bg-white/5 dark:text-zinc-400">
-          {count}
-        </span>
-      )}
-      {expanded !== undefined && (
-        <ChevronDownIcon
-          className={`hidden h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform lg:block ${
-            expanded ? "" : "-rotate-90"
-          }`}
-        />
-      )}
-    </button>
-  );
-}
+import {
+  ACTRESS_SORTS,
+  newRandomSeed,
+  PAGE_SIZE,
+  VIDEO_SORTS,
+  VIEW_TITLES,
+  type View,
+} from "./view";
 
 /**
  * 应用根组件。
@@ -158,12 +65,8 @@ export default function App() {
   // 只看待补全（资料不完整）或未刮削（未成功）的视频。
   const [incompleteOnly, setIncompleteOnly] = useState(false);
   const [unscrapedOnly, setUnscrapedOnly] = useState(false);
-  const [videos, setVideos] = useState<Video[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
-  const [actresses, setActresses] = useState<Actress[]>([]);
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(false);
   // banner 显示可关闭的持久错误，notice 是自动消失的轻提示。
   const [banner, setBanner] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -238,70 +141,32 @@ export default function App() {
       .catch(() => undefined);
   }, [refreshKey]);
 
-  // 按当前视图加载视频或演员列表；清理函数用于丢弃切换视图后返回的旧响应。
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    const request = isVideoView
-      ? api
-          .listVideos({
-            page,
-            pageSize: PAGE_SIZE,
-            q: debouncedQuery || undefined,
-            sort: videoSort,
-            seed: videoSort === "random" ? randomSeed : undefined,
-            favorite: view === "favorites-videos" ? true : undefined,
-            complete: incompleteOnly ? false : undefined,
-            scraped: unscrapedOnly ? false : undefined,
-            actressId: filterActress?.id,
-            tag: filterTag ?? undefined,
-            series: filterSeries ?? undefined,
-            category: videoCategory === "all" ? undefined : videoCategory,
-          })
-          .then((data) => {
-            if (cancelled) return;
-            setVideos(data.items);
-            setTotal(data.total);
-          })
-      : api
-          .listActresses({
-            page,
-            pageSize: PAGE_SIZE,
-            q: debouncedQuery || undefined,
-            sort: actressSort,
-            favorite: view === "favorites-actresses" ? true : undefined,
-          })
-          .then((data) => {
-            if (cancelled) return;
-            setActresses(data.items);
-            setTotal(data.total);
-          });
-    request
-      .catch((error) => {
-        if (!cancelled) setBanner(errorMessage(error));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    view,
-    page,
-    debouncedQuery,
-    videoSort,
-    randomSeed,
-    actressSort,
-    refreshKey,
+  // 列表数据加载交给独立 hook，App 只负责筛选状态与操作后的刷新。
+  const {
+    videos,
+    actresses,
+    total,
+    loading,
+    setVideos,
+    setActresses,
+  } = useLibraryList({
     isVideoView,
-    filterActress,
-    filterTag,
-    filterSeries,
+    page,
+    pageSize: PAGE_SIZE,
+    query: debouncedQuery,
+    videoSort,
+    actressSort,
+    randomSeed,
+    favorite: view.startsWith("favorites"),
     incompleteOnly,
     unscrapedOnly,
-    videoCategory,
-  ]);
+    filterActressId: filterActress?.id,
+    filterTag: filterTag ?? undefined,
+    filterSeries: filterSeries ?? undefined,
+    category: videoCategory === "all" ? undefined : videoCategory,
+    refreshKey,
+    onError: setBanner,
+  });
 
   // 任务轮询：700ms 一次以较平滑地更新进度；任务结束后递增 refreshKey，
   // 让列表、当前详情和设置面板感知到后台数据变化。
@@ -707,14 +572,7 @@ export default function App() {
   // 即使没有数据也保留 1 页，页码显示不会出现 0/0。
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const scanning = activeJobId !== null;
-  const title =
-    view === "videos"
-      ? "视频"
-      : view === "actresses"
-        ? "演员"
-        : view === "favorites-videos"
-          ? "收藏的视频"
-          : "收藏的演员";
+  const title = VIEW_TITLES[view];
 
   const sortOptions = isVideoView ? VIDEO_SORTS : ACTRESS_SORTS;
   const sortValue = isVideoView ? videoSort : actressSort;
@@ -722,100 +580,29 @@ export default function App() {
   return (
     <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* 左侧固定导航：收藏分组可折叠，主题切换和设置固定在底部。 */}
-      <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col border-r border-zinc-200 bg-white px-2 py-4 lg:w-60 lg:px-3 dark:border-white/10 dark:bg-zinc-900/70">
-        <div className="flex items-center gap-2 px-1.5 py-1">
-          <img
-            src="/icon-192.png"
-            alt="VBob"
-            className="h-9 w-9 shrink-0 rounded-xl shadow-md shadow-sky-500/20"
-          />
-          <div className="hidden min-w-0 lg:block">
-            <div className="truncate text-sm font-semibold tracking-wide">VBob</div>
-            <div className="text-[10px] text-zinc-500">本地视频库</div>
-          </div>
-        </div>
-
-        <nav className="mt-6 space-y-1">
-          <NavButton
-            icon={<FilmIcon className="h-4 w-4" />}
-            label="视频"
-            active={view === "videos" && videoCategory === "all"}
-            count={categoryCounts.all}
-            expanded={videosOpen}
-            onClick={() => {
-              // 点「视频」始终回到全部视频，同时展开/收起分类。
-              setView("videos");
-              setVideoCategory("all");
-              setVideosOpen((open) => !open);
-            }}
-          />
-          {/* 媒体分类折叠在「视频」下，与目录/源的类型一致。 */}
-          {videosOpen && (
-            <div className="space-y-0.5">
-              {CATEGORY_LABELS.map((item) => (
-                <NavButton
-                  key={item.value}
-                  icon={<span className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
-                  label={item.label}
-                  active={view === "videos" && videoCategory === item.value}
-                  count={categoryCounts[item.value]}
-                  indent
-                  onClick={() => {
-                    setView("videos");
-                    setVideoCategory(item.value);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-          <NavButton
-            icon={<UserIcon className="h-4 w-4" />}
-            label="演员"
-            active={view === "actresses"}
-            onClick={() => setView("actresses")}
-          />
-          <NavButton
-            icon={<HeartIcon className="h-4 w-4" />}
-            label="收藏"
-            active={view.startsWith("favorites")}
-            expanded={favoritesOpen}
-            onClick={() => setFavoritesOpen((open) => !open)}
-          />
-          {favoritesOpen && (
-            <div className="space-y-1">
-              <NavButton
-                icon={<FilmIcon className="h-3.5 w-3.5" />}
-                label="收藏的视频"
-                active={view === "favorites-videos"}
-                onClick={() => setView("favorites-videos")}
-                indent
-              />
-              <NavButton
-                icon={<UserIcon className="h-3.5 w-3.5" />}
-                label="收藏的演员"
-                active={view === "favorites-actresses"}
-                onClick={() => setView("favorites-actresses")}
-                indent
-              />
-            </div>
-          )}
-        </nav>
-
-        <div className="mt-auto space-y-1 border-t border-zinc-100 pt-3 dark:border-white/5">
-          <NavButton
-            icon={theme === "dark" ? <SunIcon className="h-4 w-4" /> : <MoonIcon className="h-4 w-4" />}
-            label={theme === "dark" ? "浅色主题" : "深色主题"}
-            active={false}
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          />
-          <NavButton
-            icon={<SettingsIcon className="h-4 w-4" />}
-            label="设置"
-            active={settingsOpen}
-            onClick={() => setSettingsOpen(true)}
-          />
-        </div>
-      </aside>
+      <Sidebar
+        view={view}
+        videoCategory={videoCategory}
+        categoryCounts={categoryCounts}
+        videosOpen={videosOpen}
+        favoritesOpen={favoritesOpen}
+        theme={theme}
+        settingsOpen={settingsOpen}
+        onSelectView={setView}
+        onSelectCategory={(category) => {
+          setView("videos");
+          setVideoCategory(category);
+        }}
+        onToggleVideos={() => {
+          // 点「视频」始终回到全部视频，同时展开/收起分类。
+          setView("videos");
+          setVideoCategory("all");
+          setVideosOpen((open) => !open);
+        }}
+        onToggleFavorites={() => setFavoritesOpen((open) => !open)}
+        onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 后台任务条与错误提示放在内容区上方，滚动时仍保持全局可见。 */}

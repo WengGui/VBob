@@ -1,8 +1,10 @@
 # VBob 使用文档
 
-> 适用版本：0.3.0（2026-11-19）
+> 适用版本：0.3.0 及后续未发布改动（2026-11-20）
 >
-> 设计说明见 [design.md](design.md)，接口文档启动后访问 <http://127.0.0.1:8080/docs>。
+> 文档索引：使用说明（本文） · [设计说明](design.md) · [开发指南](development.md) · [数据迁移 SQL](数据迁移SQL.md)
+>
+> 接口文档：服务启动后访问 <http://127.0.0.1:8080/docs>。
 
 ## 1. 简介
 
@@ -230,7 +232,7 @@ http://127.0.0.1:8080/?theme=dark
 - 常用选择器：`css: .title@text`、`xpath: //h3/text()`、`json: results[0].title`、`regex: ([A-Z]+-\\d+)`。
 - 数组字段（演员、标签）在表达式后加 `| array`，例如 `css: .star a@text | array`。
 - 占位符使用内部键名：`{jav_code}`、`{code}`、`{title}`、`{year}`、`{actress_name}`、`{actress_url}`。
-- 保存时会做结构校验；内置源只能启用/禁用或调优先级，不能编辑/删除。
+- 保存时会做结构校验；首次启动写入的 JavBus 源是普通源，可自由编辑或删除（删除后可用「恢复默认源」或 javBus 模板重新添加）。
 - 刮削执行按当前顺序逐源合并，手动编辑过的字段不会被覆盖；封面 URL 会自动下载到本地。
 - 每次源尝试都会写入刮削日志，可在视频详情的「刮削日志」中查看成功/失败原因。
 - **网络连通性检测**：设置 → 刮削源中每个源都有一个 5 格信号条，点击即探测该源站点的域名；
@@ -249,18 +251,21 @@ http://127.0.0.1:8080/?theme=dark
   状态码与耗时显示在信号条右侧和鼠标悬停提示里。结果会写入 `sources.last_test_result_json`，
   下次打开设置页仍显示上次的信号；地址整段由上游提供的源（如演员源的 `{actress_url}`）没有固定域名，会提示无法检测。
 
-**内置模板（TMDB / Shikimori）**
+**内置模板（JavBus / TMDB / Shikimori / ThePornDB）**
 
 设置 → 刮削源 → 「从模板添加」可以一键创建：
 
 | 模板 | 媒体类型 | 用途 | 需要配置 |
 |------|----------|------|----------|
+| javBus | JAV | 番号、标题、发行日期、演员、标签、封面、时长、厂商 | 无 |
+| javBusActress | JAV | 生日、身高、三围、罩杯、封面 | 无 |
 | TMDB 电影 | 电影 | 中文名、原名、简介、海报、时长、类型、导演、制片公司 | API 密钥 |
 | TMDB 剧集 | 剧集 | 中文名、原名、简介、海报、类型、制作公司 | API 密钥 |
 | TMDB 动漫 | 动漫 | 中文名、原名、简介、海报、类型、制作公司 | API 密钥 |
 | Shikimori 动漫 | 动漫 | 原名、海报、类型、制作公司（MyAnimeList 镜像） | 无 |
 | ThePornDB | 其他 | 欧美成人影片/场景：标题、日期、简介、封面、片商、演员、标签 | API Token |
 
+- javBus / javBusActress 与首次启动写入的默认源配置完全相同，删除后既可以用模板重新添加，也可以点「恢复默认源」。站点域名变化时在「编辑」里修改请求 URL。
 - TMDB 密钥申请：登录 <https://www.themoviedb.org> → Settings → API → 复制 **API Key（v3 auth）** 的 32 位字符串。创建模板后点源的「编辑」，填入「API 密钥」即可，对应配置项为 `vars.api_key`，URL 中用 `{api_key}` 引用。密钥只保存在本地数据库。
 - 模板使用 `api.tmdb.org` 域名：部分网络下 `api.themoviedb.org` 会被 DNS 污染而超时。
 - Shikimori 的简介是俄文，因此模板不提取简介；中文简介由 TMDB 提供。
@@ -381,6 +386,9 @@ curl -X PUT http://127.0.0.1:8080/api/settings \
 }
 ```
 
+- `scraping.workers`：批量刮削的并发视频数（1-16，默认 3）。调大能更快跑完大目录，但会同时向源站点发起更多请求；站点限流严格时建议保持 1-2。
+- `scraping.cache_ttl_sec` / `negative_ttl_sec`：预留给刮削结果缓存，当前版本尚未使用。
+
 ### 8.2 指定播放器
 
 ```bash
@@ -430,6 +438,8 @@ POST   /api/videos/{id}/detach-files    {file_ids:[...]} 文件移出剧集
 POST   /api/videos/{id}/delete-files    {file_ids:[...]} 彻底删除文件
 POST   /api/scan-roots/{id}/delete      {delete_files} 删除目录数据/文件
 POST   /api/sources/restore-defaults    补齐默认刮削源
+GET    /api/sources/templates           列出内置模板（JavBus / TMDB / Shikimori / ThePornDB）
+POST   /api/sources/templates/{key}     按模板创建源；同名已存在返回 409
 POST   /api/sources/{id}/probe          检测单个源连通性，返回 level(0-5)/latency_ms/status_code
 POST   /api/sources/probe               并发检测全部源，返回 {items:[{source_id, ...}]}
 
@@ -469,6 +479,7 @@ uv run vbob --data-dir D:\VBobData
 ```
 <data-dir>/
   vbob.db
+  backups/           升级前的自动数据库备份
   covers/videos/
   covers/actresses/
   screenshots/
@@ -476,6 +487,10 @@ uv run vbob --data-dir D:\VBobData
 ```
 
 备份：停止服务后复制整个数据目录即可。数据库使用 WAL 模式，建议同时复制 `vbob.db-wal`、`vbob.db-shm`，或先停止服务再复制。
+
+**升级自动备份**：启动时如果检测到有新版本迁移需要执行，会先把数据库复制到 `backups/vbob-<时间>.db`，最多保留 5 份。升级出错时关闭服务，把最新备份改名为 `vbob.db`（同时删除旧的 `-wal`/`-shm`）即可回滚。
+
+**图片文件清理**：删除影片/演员记录时会同步删除对应的封面与截图；启动时还会扫描 `covers/`、`screenshots/`，清理旧版本遗留的、数据库已不再引用的文件。
 
 ## 10. 常见问题
 
@@ -571,9 +586,9 @@ VBob 后端必须能直接访问扫描时保存的路径。若视频在 NAS 上�
 
 ## 11. 当前限制与后续计划
 
-- 批量刮削为顺序执行，尚未加入并发/断点续跑。
+- 批量刮削支持并发（`scraping.workers`），但尚不支持断点续跑；取消后重新发起会从头处理未完整的数据。
 - 源配置暂未开放请求头、Cookies、超时/重试/限流等高级字段的图形化编辑（配置结构已预留，可通过 API 写入）。
-- 源测试、SSE 实时进度、播放进度/继续观看尚未实现。
+- SSE 实时进度、播放进度/继续观看尚未实现。
 - 演员别名合并界面尚未实现；同名演员按规范化姓名去重。
 
 ## 12. 安全说明
@@ -581,3 +596,11 @@ VBob 后端必须能直接访问扫描时保存的路径。若视频在 NAS 上�
 - 默认只监听 `127.0.0.1`，不提供鉴权，请勿将服务暴露到局域网或公网。
 - 用户自定义的刮削源 URL 由本机后端直接请求，存在访问任意地址的可能；只填写可信来源。
 - 播放只接受由 `video_id` 解析出、且位于扫描目录内的文件路径。
+
+## 13. 版本变更
+
+各版本的功能变化与修复记录见 [README 更新日志](../README.md#更新日志)。
+
+- 升级前无需手动迁移：服务启动时自动执行数据库迁移，并在有变更时先备份到 `data/backups/`。
+- 旧版本数据升级后，源、目录与视频统一归为 JAV 分类，可在「编辑」中逐项调整。
+- 跨版本排障时，可先查看 `data/logs/vbob.log` 与视频详情的「刮削日志」。

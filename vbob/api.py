@@ -60,8 +60,19 @@ router = APIRouter(prefix="/api")
 log = logging.getLogger(__name__)
 
 SCRAPE_STATUSES = {"pending", "scraping", "success", "failed", "no_match", "skipped_manual"}
-# 封面/截图会随刮削被替换，要求浏览器每次重新校验（未变化时返回 304）。
+# 未带版本参数的图片可能被原地覆盖（上传新封面），必须每次回源确认。
 IMAGE_CACHE_HEADERS = {"Cache-Control": "no-cache"}
+# 前端在封面地址后追加 ?v=版本号，内容随 URL 变化，可以放心长期缓存。
+IMAGE_VERSIONED_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
+
+
+def _image_headers(request: Request) -> dict[str, str]:
+    """带版本参数的图片用长缓存，其余保持 no-cache。"""
+    return (
+        IMAGE_VERSIONED_HEADERS
+        if request.query_params.get("v")
+        else IMAGE_CACHE_HEADERS
+    )
 
 
 def _store(request: Request) -> Store:
@@ -536,10 +547,8 @@ def delete_video_files(
 @router.get("/videos/{video_id}/cover")
 def get_cover(request: Request, video_id: int) -> FileResponse:
     """返回视频封面文件；视频或封面不存在返回 404。"""
-    detail = _store(request).get_video(video_id)
-    metadata = detail["metadata"] or {}
-    path = _data_file(request, metadata.get("cover_local"))
-    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
+    path = _data_file(request, _store(request).get_video_cover_path(video_id))
+    return FileResponse(path, headers=_image_headers(request))
 
 
 @router.post("/videos/{video_id}/cover")
@@ -597,9 +606,8 @@ def refresh_video_cover(request: Request, video_id: int) -> dict[str, Any]:
 @router.get("/videos/{video_id}/screenshot")
 def get_screenshot(request: Request, video_id: int) -> FileResponse:
     """返回视频截图文件；视频或截图不存在返回 404。"""
-    detail = _store(request).get_video(video_id)
-    path = _data_file(request, detail["video"].get("screenshot"))
-    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
+    path = _data_file(request, _store(request).get_video_screenshot(video_id))
+    return FileResponse(path, headers=_image_headers(request))
 
 
 @router.post("/videos/{video_id}/play")
@@ -747,9 +755,8 @@ def scrape_actress(
 @router.get("/actresses/{actress_id}/cover")
 def get_actress_cover(request: Request, actress_id: int) -> FileResponse:
     """返回演员封面文件；演员或封面不存在返回 404。"""
-    detail = _store(request).get_actress(actress_id)
-    path = _data_file(request, detail["actress"].get("cover_local"))
-    return FileResponse(path, headers=IMAGE_CACHE_HEADERS)
+    path = _data_file(request, _store(request).get_actress_cover_path(actress_id))
+    return FileResponse(path, headers=_image_headers(request))
 
 
 @router.post("/actresses/{actress_id}/cover")

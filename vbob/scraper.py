@@ -15,7 +15,9 @@ import html
 import json
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,35 +30,25 @@ from parsel import Selector
 
 from .categories import CATEGORY_LABELS, DEFAULT_CATEGORY
 from .errors import JobCanceled, NotFoundError
+from .http_utils import (
+    DEFAULT_HEADERS,
+    PLACEHOLDER,
+    SkipSource,
+    fill_json,
+    fill_raw,
+    parse_cookies,
+)
 from .images import download_image, save_cover
 from .store import Store
 
 log = logging.getLogger(__name__)
 
-# 伪装成真实浏览器，部分站点（尤其是年龄验证页）会拒绝非浏览器 UA。
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
-)
-DEFAULT_HEADERS = {
-    "User-Agent": DEFAULT_UA,
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,image/apng,*/*;q=0.8"
-    ),
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-}
 # 命中这些标题通常说明拿到的是 404/检索结果/错误页，应判定为无效匹配。
 DEFAULT_DENY = ("404", "not found", "page not found", "検索結果", "エラー", "找不到")
-# 配置模板中的 {name} 占位符；普通占位符在填充时会做 URL 编码。
-PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 # 记录每个 host 上次请求时间（monotonic），用于按 qps 限流。
 _LAST_REQUEST: dict[str, float] = {}
+# 批量刮削会并发请求多个视频，限流状态需要加锁避免竞争。
+_THROTTLE_LOCK = threading.Lock()
 
 VIDEO_FIELDS = {
     "title", "original_title", "overview", "release_date", "year", "runtime_sec",
@@ -67,10 +59,6 @@ ACTRESS_FIELDS = {
     "birth_date", "nationality", "cover_url", "profile_url", "height_cm",
     "bust_cm", "waist_cm", "hips_cm", "cup", "aliases",
 }
-
-
-class _SkipSource(Exception):
-    """源配置缺少必要占位符或 URL 非法时抛出，用于静默跳过该源。"""
 
 
 class _RequestFailed(Exception):
@@ -118,7 +106,7 @@ class SourceRunner:
                 fields.update(detail_fields)
                 if detail_actresses:
                     actress_specs = detail_actresses
-        except _SkipSource as exc:
+        except SkipSource as exc:
             return None, str(exc)
         except _RequestFailed as exc:
             return None, str(exc)
@@ -180,14 +168,14 @@ class SourceRunner:
         for key, value in (request.get("headers") or {}).items():
             text = str(value)
             if "{" in text:
-                text = _fill_raw(text, values)
+                text = fill_raw(text, values)
             headers[str(key)] = text
         content, content_type = self._prepare_body(request, values)
         if content is not None and not any(
             key.lower() == "content-type" for key in headers
         ):
             headers["Content-Type"] = str(content_type)
-        cookies = _parse_cookies(request.get("cookies"))
+        cookies = parse_cookies(request.get("cookies"))
         timeout = max(1.0, float(request.get("timeout_ms", 10000)) / 1000)
         retries = int((request.get("retry") or {}).get("max", 1))
         proxy = request.get("proxy") or None
@@ -293,7 +281,7 @@ class SourceRunner:
         try:
             text, final_url = self._fetch(merged, values)
             return self._extract(detail.get("extract") or {}, text, final_url, config)
-        except (_SkipSource, _RequestFailed) as exc:
+        except (SkipSource, _RequestFailed) as exc:
             # 详情失败不影响列表结果，但写日志便于排查；不打印 URL 以免泄露密钥。
             log.warning("detail request failed: %s", exc)
             return {}, [], [f"detail: {exc}"]
@@ -307,9 +295,9 @@ class SourceRunner:
         if body is None:
             return None, None
         if isinstance(body, str):
-            return _fill_raw(body, values), "application/json"
+            return fill_raw(body, values), "application/json"
         return (
-            json.dumps(_fill_json(body, values), ensure_ascii=False),
+            json.dumps(fill_json(body, values), ensure_ascii=False),
             "application/json",
         )
 
@@ -324,12 +312,12 @@ class SourceRunner:
             key = match.group(1)
             value = values.get(key)
             if value is None or value == "":
-                raise _SkipSource(f"缺少占位符 {{{key}}}")
+                raise SkipSource(f"缺少占位符 {{{key}}}")
             text = str(value)
             if key == "actress_url" or key.endswith("_url"):
                 # URL 类占位符不能再编码，只校验协议，避免破坏路径与查询串。
                 if urlsplit(text).scheme not in {"http", "https"}:
-                    raise _SkipSource(f"占位符 {{{key}}} 不是有效 URL")
+                    raise SkipSource(f"占位符 {{{key}}} 不是有效 URL")
                 return text
             return quote(text, safe="")
 
@@ -345,11 +333,14 @@ class SourceRunner:
         if qps <= 0:
             return
         host = urlsplit(url).netloc
-        last = _LAST_REQUEST.get(host, 0.0)
-        wait = (1.0 / qps) - (time.monotonic() - last)
-        if wait > 0:
-            time.sleep(wait)
-        _LAST_REQUEST[host] = time.monotonic()
+        # 锁住“读取上次时间 + 等待 + 写回”，并发 worker 才能严格遵守 qps；
+        # 等待时间通常不足 1 秒，对整个批量任务影响很小。
+        with _THROTTLE_LOCK:
+            last = _LAST_REQUEST.get(host, 0.0)
+            wait = (1.0 / qps) - (time.monotonic() - last)
+            if wait > 0:
+                time.sleep(wait)
+            _LAST_REQUEST[host] = time.monotonic()
 
     def _extract_structured_actresses(
         self,
@@ -391,10 +382,32 @@ class Scraper:
         self.data_dir = data_dir
         self.job_id = job_id
         self.runner = SourceRunner(data_dir)
+        # 一次刮削任务内源和目录配置不会变化，缓存下来避免每个视频都查库。
+        self._source_cache: list[dict[str, Any]] | None = None
+        self._root_cache: dict[int, dict[str, Any] | None] = {}
+        self._cache_lock = threading.Lock()
 
     def _sources(self) -> list[dict[str, Any]]:
         """返回已启用的源，顺序沿用 store 中的优先级排序。"""
-        return [source for source in self.store.list_sources() if source["enabled"]]
+        with self._cache_lock:
+            if self._source_cache is None:
+                self._source_cache = [
+                    source for source in self.store.list_sources() if source["enabled"]
+                ]
+            return self._source_cache
+
+    def _root(self, root_id: int) -> dict[str, Any] | None:
+        """按 id 取扫描目录（带缓存），目录已被删除时返回 None。"""
+        with self._cache_lock:
+            if root_id in self._root_cache:
+                return self._root_cache[root_id]
+        try:
+            root = self.store.get_root(root_id)
+        except NotFoundError:
+            root = None
+        with self._cache_lock:
+            self._root_cache[root_id] = root
+        return root
 
     def _sources_for_video(
         self, video: dict[str, Any], meta: dict[str, Any]
@@ -423,10 +436,7 @@ class Scraper:
         # 2. 目录限定的源：完全按用户勾选顺序执行，忽略全局优先级。
         root = None
         if video.get("root_id") is not None:
-            try:
-                root = self.store.get_root(int(video["root_id"]))
-            except NotFoundError:
-                root = None
+            root = self._root(int(video["root_id"]))
         if root and root.get("source_ids"):
             selected = [
                 by_id[item]
@@ -507,6 +517,8 @@ class Scraper:
         matched_sources: list[str] = []
         matched_by = ""
         errors: list[str] = []
+        # 记录提供封面地址的源所用代理，下载图片时沿用同一网络出口。
+        cover_proxy: str | None = None
 
         for source in sources:
             config = source["config"]
@@ -532,6 +544,8 @@ class Scraper:
             for key, value in result.fields.items():
                 if key not in accumulated and value not in (None, "", []):
                     accumulated[key] = value
+                    if key == "cover_url":
+                        cover_proxy = (config.get("request") or {}).get("proxy") or None
             # 演员资料只取第一个提供了结构化链接的源。
             if result.actresses and not actress_refs:
                 actress_refs = [
@@ -563,7 +577,7 @@ class Scraper:
         # 手动维护过封面且不覆盖时，跳过下载。
         if cover_url and ("cover_local" not in manual or overwrite_manual):
             try:
-                data = download_image(str(cover_url))
+                data = download_image(str(cover_url), proxy=cover_proxy)
                 accumulated["cover_local"] = save_cover(
                     self.data_dir, "videos", video_id, data
                 )
@@ -640,6 +654,7 @@ class Scraper:
         accumulated: dict[str, Any] = {}
         matched_sources: list[str] = []
         errors: list[str] = []
+        cover_proxy: str | None = None
         for source in sources:
             result, error = self.runner.run(source, values)
             if error:
@@ -656,6 +671,10 @@ class Scraper:
             for key, value in result.fields.items():
                 if key in ACTRESS_FIELDS and key not in accumulated:
                     accumulated[key] = value
+                    if key == "cover_url":
+                        cover_proxy = (source["config"].get("request") or {}).get(
+                            "proxy"
+                        ) or None
             matched_sources.append(source["name"])
             self.store.log_scrape(
                 0, self.job_id, source["name"], "actress_name", True,
@@ -672,7 +691,7 @@ class Scraper:
         cover_url = accumulated.get("cover_url")
         if cover_url:
             try:
-                data = download_image(str(cover_url))
+                data = download_image(str(cover_url), proxy=cover_proxy)
                 accumulated["cover_local"] = save_cover(
                     self.data_dir, "actresses", actress_id, data
                 )
@@ -705,33 +724,41 @@ class Scraper:
         cancel_event: Any = None,
         progress: Any = None,
     ) -> dict[str, int]:
-        """批量刮削某个目录下的视频，逐个执行并汇总计数。"""
+        """批量刮削某个目录下的视频，按设置的并发数执行并汇总计数。
+
+        并发数来自 ``scraping.workers``（默认 3）。单个视频失败只记录日志，
+        不影响其余视频；取消标记在每个任务完成时检查，已发出的请求会自然结束。
+        """
         video_ids = self.store.list_video_ids_for_scrape(root_id, force=force)
         total = len(video_ids)
         counts = {"success": 0, "no_match": 0, "failed": 0, "skipped": 0, "errors": 0}
         progress_cb = progress or (lambda **_: None)
         progress_cb(done=0, total=total, message=f"准备刮削 {total} 个视频")
-        for index, video_id in enumerate(video_ids, start=1):
-            # 每个视频前检查取消标记，保证任务能及时停止。
-            if cancel_event is not None and cancel_event.is_set():
-                raise JobCanceled()
+        if total == 0:
+            return counts
+
+        workers = min(self._batch_workers(), total)
+
+        def run_one(video_id: int) -> dict[str, Any] | None:
+            """在工作线程中刮削单个视频；异常在这里转成失败结果。"""
             try:
-                outcome = self.scrape_video(
+                return self.scrape_video(
                     video_id, force=force, overwrite_manual=overwrite_manual
                 )
-                status = outcome.get("status", "failed")
-                if status in counts:
-                    counts[status] += 1
-                if outcome.get("errors"):
-                    counts["errors"] += len(outcome["errors"])
             except Exception as exc:  # noqa: BLE001 - continue with the next video
-                # 单个视频异常不终止整批，继续处理下一个。
-                counts["failed"] += 1
-                counts["errors"] += 1
                 log.exception("batch scrape failed video=%s", video_id)
                 self.store.log_scrape(
-                    video_id, self.job_id, "batch", "", False, f"{type(exc).__name__}: {exc}"
+                    video_id, self.job_id, "batch", "", False,
+                    f"{type(exc).__name__}: {exc}",
                 )
+                return {"status": "failed", "errors": [str(exc)]}
+
+        def record(outcome: dict[str, Any] | None, index: int) -> None:
+            status = (outcome or {}).get("status", "failed")
+            if status in counts:
+                counts[status] += 1
+            if outcome and outcome.get("errors"):
+                counts["errors"] += len(outcome["errors"])
             progress_cb(
                 done=index,
                 total=total,
@@ -741,21 +768,37 @@ class Scraper:
                     f"无匹配 {counts['no_match']}，失败 {counts['failed']}"
                 ),
             )
+
+        if workers <= 1:
+            for index, video_id in enumerate(video_ids, start=1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise JobCanceled()
+                record(run_one(video_id), index)
+            return counts
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scrape") as pool:
+            futures = {pool.submit(run_one, video_id): video_id for video_id in video_ids}
+            done = 0
+            for future in as_completed(futures):
+                # 取消后停止汇总并丢弃尚未开始的任务；正在请求的 worker 会在
+                # 线程池退出时等待其自然结束（受单次请求超时约束）。
+                if cancel_event is not None and cancel_event.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    raise JobCanceled()
+                done += 1
+                record(future.result(), done)
         return counts
 
-
-def _parse_cookies(value: Any) -> dict[str, str]:
-    """把字典或 "a=1; b=2" 形式的 Cookie 配置统一解析为字典。"""
-    if isinstance(value, dict):
-        return {str(k): str(v) for k, v in value.items()}
-    if isinstance(value, str) and value.strip():
-        result: dict[str, str] = {}
-        for part in value.split(";"):
-            if "=" in part:
-                key, val = part.split("=", 1)
-                result[key.strip()] = val.strip()
-        return result
-    return {}
+    def _batch_workers(self) -> int:
+        """读取设置中的批量并发数；读取失败时退回 1（串行）。"""
+        try:
+            workers = int(
+                self.store.get_settings().get("scraping", {}).get("workers", 3)
+            )
+        except (TypeError, ValueError, KeyError):
+            return 1
+        return max(1, min(16, workers))
 
 
 def _decode(content: bytes, response: httpx.Response, setting: str) -> str:
@@ -957,29 +1000,6 @@ def _normalize_date(value: str) -> str:
         return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
     match = re.search(r"(?:19|20)\d{2}", text)
     return match.group(0) if match else text
-
-
-def _fill_raw(template: str, values: dict[str, Any]) -> str:
-    """把占位符替换为原始值（不做 URL 编码），用于请求体和请求头。"""
-    def replace(match: re.Match[str]) -> str:
-        key = match.group(1)
-        value = values.get(key)
-        if value is None or value == "":
-            raise _SkipSource(f"缺少占位符 {{{key}}}")
-        return str(value)
-
-    return PLACEHOLDER.sub(replace, template)
-
-
-def _fill_json(value: Any, values: dict[str, Any]) -> Any:
-    """递归填充 JSON 结构中的占位符，返回可直接序列化的新对象。"""
-    if isinstance(value, dict):
-        return {key: _fill_json(item, values) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_fill_json(item, values) for item in value]
-    if isinstance(value, str):
-        return _fill_raw(value, values)
-    return value
 
 
 def _absolute_url(value: str, base_url: str, config: dict[str, Any]) -> str:

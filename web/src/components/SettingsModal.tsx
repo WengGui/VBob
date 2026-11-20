@@ -152,6 +152,15 @@ export function SettingsModal({
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  // Esc 关闭设置面板，和通用弹窗的行为保持一致。
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   // 按模板创建源；TMDB 模板创建后仍需在编辑弹窗里填写 API 密钥。
   async function addTemplate(template: SourceTemplate) {
     try {
@@ -266,6 +275,9 @@ export function SettingsModal({
       <div
         className="flex h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-white/10 dark:bg-zinc-950"
         onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="全局设置"
       >
         <div className="flex items-center justify-between border-b border-zinc-100 px-6 py-4 dark:border-white/10">
           <div>
@@ -531,7 +543,7 @@ export function SettingsModal({
                       })}
                     </div>
                     <p className="mt-2 text-[10px] text-zinc-400">
-                      TMDB 需要在「编辑」里填写 API 密钥；Shikimori 无需配置。
+                      TMDB 需要在「编辑」里填写 API 密钥；JavBus、Shikimori 无需配置。
                     </p>
                   </div>
                 )}

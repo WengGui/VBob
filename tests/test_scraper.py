@@ -662,3 +662,40 @@ def test_missing_api_key_skips_source_before_request(
     result, error = runner.run(source, {"title": "x"})
     assert result is None
     assert error is not None and "api_key" in error
+
+
+def test_unreachable_source_returns_failure_not_exception(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """源站点连接失败时应返回 failed 与原因，不能抛出未定义异常。"""
+    from vbob.scraper import Scraper
+
+    media = tmp_path / "badreq"
+    media.mkdir()
+    (media / "SSIS-001.mp4").write_bytes(b"video")
+    client.put("/api/settings", json={"scan": {"min_size_mb": 0}})
+    root = client.post("/api/scan-roots", json={"path": str(media)}).json()
+    job = client.post("/api/scans", json={"root_id": root["id"]}).json()
+    wait_job(client, job["job_id"])
+    video_id = client.get("/api/videos").json()["items"][0]["id"]
+
+    client.post(
+        "/api/sources",
+        json={
+            "name": "unreachable-source",
+            "type": "feature",
+            "feature": "jav_code",
+            "request": {"url": "http://127.0.0.1:1/{jav_code}", "timeout_ms": 800},
+            "extract": {"title": "css: h1@text"},
+        },
+    )
+
+    scraper = Scraper(
+        client.app.state.store, Path(client.app.state.data_dir), "test-job"
+    )
+    outcome = scraper.scrape_video(video_id, force=True)
+
+    assert outcome["status"] == "failed"
+    # 错误信息来自源名 + 网络异常，而不是未捕获的 NameError。
+    assert outcome["message"].startswith("unreachable-source: ")
+    assert ":" in outcome["message"]

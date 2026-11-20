@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test before release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --extra dev
+
+      - name: Run pytest
+        run: uv run pytest -q
+
   build:
     name: Build Windows package
+    needs: test
     runs-on: windows-latest
 
     steps:
@@ -29,6 +49,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm test
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6

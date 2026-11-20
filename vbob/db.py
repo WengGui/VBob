@@ -6,12 +6,18 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+
+log = logging.getLogger(__name__)
+
+# 迁移前备份最多保留的份数；超过后按文件名（时间）从旧到新删除。
+MAX_MIGRATION_BACKUPS = 5
 
 if getattr(sys, "frozen", False):
     # 打包后迁移 SQL 由 PyInstaller 放到 _MEIPASS/vbob/migrations。
@@ -88,7 +94,16 @@ class Database:
             applied = {
                 row["version"] for row in conn.execute("SELECT version FROM schema_migrations")
             }
-            for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            sql_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+            pending = [
+                sql_file
+                for sql_file in sql_files
+                if sql_file.name.split("_", 1)[0] not in applied
+            ]
+            # 已有数据的库在升级前留一份备份；全新库没有可备份的内容。
+            if pending and applied:
+                self._backup_before_migrate(conn)
+            for sql_file in sql_files:
                 # 版本号取文件名第一个下划线之前的部分，例如 0002_xxx.sql -> 0002。
                 version = sql_file.name.split("_", 1)[0]
                 if version in applied:
@@ -110,3 +125,23 @@ class Database:
                     except sqlite3.OperationalError:
                         pass
                     raise
+
+    def _backup_before_migrate(self, conn: sqlite3.Connection) -> None:
+        """在应用新迁移前把数据库复制到 ``backups/``，保留最近若干份。
+
+        使用 SQLite 的在线备份接口，WAL 中尚未落盘的内容也会一并复制；
+        备份失败不阻止迁移，只记录警告（宁可继续升级也不要卡住启动）。
+        """
+        backup_dir = self.path.parent / "backups"
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = utc_now().replace(":", "-").replace(".", "-")
+            target = backup_dir / f"vbob-{stamp}.db"
+            with sqlite3.connect(target) as dest:
+                conn.backup(dest)
+            backups = sorted(backup_dir.glob("vbob-*.db"))
+            for old in backups[:-MAX_MIGRATION_BACKUPS]:
+                old.unlink(missing_ok=True)
+            log.info("database backed up before migration: %s", target)
+        except Exception:  # noqa: BLE001 - 备份失败不应阻塞启动
+            log.warning("failed to back up database before migration", exc_info=True)

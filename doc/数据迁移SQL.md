@@ -68,6 +68,20 @@ COMMIT;
 
 > ⚠️ 如果手工执行上面的 SQL，必须连同最后的 `INSERT INTO schema_migrations` 一起执行，否则下次启动会重复建列并报错。已经升级过的库不要再执行。
 
+### 1.1 后续版本还会自动执行 0006
+
+当前版本启动时还会执行 `0006_source_probe.sql`：
+
+```sql
+ALTER TABLE sources ADD COLUMN last_test_result_json TEXT;
+```
+
+它只为每个源保存最近一次连通性检测结果（信号格数、耗时、状态码），不改动任何旧数据。用新版启动一次即可，无需手工执行。
+
+### 1.2 自动备份
+
+从带自动备份的版本开始，启动时检测到有待应用迁移，会先把数据库复制到 `data/backups/vbob-<时间>.db`，最多保留 5 份。这层备份与手工备份互为补充；升级失败时优先用自动备份或你提前复制的整个 `data` 目录恢复。
+
 ## 二、可选：按实际情况修正分类
 
 以下 SQL 都在**自动迁移之后**执行。先在 SQLite 工具里运行查询确认结果，再执行 UPDATE。
@@ -177,7 +191,7 @@ WHERE id = 123;
 ## 三、验证
 
 ```sql
--- 结构版本应包含 0005
+-- 结构版本应包含 0005、0006（以当前发布版本为准）
 SELECT version FROM schema_migrations ORDER BY version;
 
 -- 新列是否存在

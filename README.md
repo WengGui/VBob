@@ -12,6 +12,7 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows&logoColor=white">
+  <a href="https://github.com/WengGui/VBob/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/WengGui/VBob/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
@@ -45,8 +46,9 @@ VBob 是一个**完全本地运行**的视频库管理工具。它扫描你指�
 - 每个源可一键检测网络连通性，用手机信号式的 5 格信号条显示域名可达性与响应速度；
 - 目录可按顺序限定源；视频详情可切换并记住偏好源，支持覆盖式重刮；
 - 支持二次详情请求、源级变量与封面 CDN 前缀，适配 TMDB、Shikimori 等 JSON API；
-- 多源合并、封面下载、逐源日志、单视频重刮、按目录批量刮削；
+- 多源合并、封面下载、逐源日志、单视频重刮、按目录批量刮削（并发数可调）；
 - 封面下载自动重试并支持多尺寸兜底，失败后可在详情页一键「重新下载封面」；
+- 删除影片/演员时同步清理本地封面，启动时清理数据库不再引用的孤儿图片；
 - 手动修正番号后会用于后续刮削，重新扫描不会覆盖已修正的信息；
 - 演员独立资料页、作品数统计、收藏与封面管理。
 
@@ -125,7 +127,10 @@ uv run vbob             # 另一个终端
 
 ```bash
 uv run pytest
+cd web && npm test   # 前端纯函数测试
 ```
+
+推送分支或提交 PR 时，GitHub Actions 会运行后端测试和前端构建/测试。
 
 ## 打包 Windows 版
 
@@ -149,9 +154,14 @@ git push origin v0.1.0
 
 图标源文件为 `doc/vbob_icon.png`，修改后运行 `uv run --with pillow python scripts/make_icons.py` 重新生成网站 favicon 与 `assets/vbob.ico`。
 
-## 使用文档
+## 文档
 
-完整使用说明见 [doc/usage.md](doc/usage.md)，设计说明见 [doc/design.md](doc/design.md)。
+| 文档 | 内容 |
+| --- | --- |
+| [doc/usage.md](doc/usage.md) | 完整使用说明：目录、扫描、刮削、源模板、连通性检测、API 与 FAQ |
+| [doc/design.md](doc/design.md) | 架构、数据模型、源配置格式、调度与 v0.6 增量设计 |
+| [doc/development.md](doc/development.md) | 开发指南：环境、代码结构、测试、调试与发布流程 |
+| [doc/数据迁移SQL.md](doc/数据迁移SQL.md) | 旧库升级到媒体分类版本的 SQL 与回滚说明 |
 
 ## 第三方元数据
 
@@ -159,6 +169,8 @@ git push origin v0.1.0
 
 | 模板 | 媒体类型 | 用途 | 需要配置 |
 | --- | --- | --- | --- |
+| javBus | JAV | 番号、标题、发行日期、演员、标签、封面、时长、厂商 | 无 |
+| javBusActress | JAV | 演员生日、身高、三围、罩杯、封面 | 无 |
 | TMDB 电影 | 电影 | 中文名、原名、简介、海报、时长、类型、导演 | TMDB API Key（v3） |
 | TMDB 剧集 | 剧集 | 中文名、原名、简介、海报、类型、制作公司 | TMDB API Key（v3） |
 | TMDB 动漫 | 动漫 | 中文名、原名、简介、海报、类型、制作公司 | TMDB API Key（v3） |
@@ -184,13 +196,16 @@ git push origin v0.1.0
 ## 项目结构
 
 ```text
-vbob/                后端：API、扫描、刮削、存储、播放器
-vbob/migrations/     SQLite 迁移脚本
+vbob/                后端：API、扫描、刮削、连通性检测、存储、播放器
+vbob/store/          数据访问层：按领域拆分的 mixin，Store 为统一门面
+vbob/migrations/     SQLite 迁移脚本（0001-0006）
 web/                 前端：React + Vite
+web/src/components/  界面组件（侧栏、弹窗、信号条、海报卡等）
+web/src/hooks/       数据加载 hook
 web/public/          网站图标等静态资源
-tests/               后端测试
+tests/               后端测试（前端测试与被测文件放在一起）
 scripts/             构建与图标生成脚本
-doc/                 使用与设计文档
+doc/                 使用、设计、开发与迁移文档
 assets/              exe 图标
 ```
 
@@ -226,6 +241,17 @@ assets/              exe 图标
 
 ## 更新日志
 
+### 未发布
+
+- 内置模板新增 javBus / javBusActress（与首次启动的默认源一致），删除后可一键重新添加；
+- 批量刮削支持并发（`scraping.workers`，默认 3），并复用一次任务内的源/目录配置；
+- 删除影片或演员时同步删除本地封面，启动时清理数据库不再引用的孤儿图片；
+- 数据库升级前自动备份到 `data/backups/`，最多保留 5 份；
+- 封面接口改为轻量查询，带版本参数的图片可长期缓存；
+- 图片下载与刮削统一使用 httpx，并遵循源配置的代理；
+- 前端拆分侧栏、列表加载 hook 与通用组件，弹窗支持 Esc 关闭与焦点管理，新增根级错误页；
+- 新增 GitHub Actions CI（后端测试 + 前端构建/测试），发布前强制跑测试。
+
 ### v0.3.0
 
 - 刮削源支持网络连通性检测：单个或一键检测全部源，用 5 格信号条按响应耗时显示网络质量；
@@ -251,8 +277,10 @@ assets/              exe 图标
 欢迎提交 Issue 和 Pull Request。提交前请确保：
 
 - `uv run pytest` 全部通过；
-- 前端执行 `npm run build`（含 TypeScript 检查）通过；
+- `cd web && npm test && npm run build` 通过（构建含 TypeScript 检查）；
 - 代码风格与现有实现保持一致，并补充必要的测试。
+
+开发环境、代码结构、调试与发布流程详见 [doc/development.md](doc/development.md)。
 
 ## License
 

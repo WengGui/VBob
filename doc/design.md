@@ -1,6 +1,6 @@
 # 本地视频管理刮削系统 — 设计文档
 
-> 版本 v0.5（2026-10-29，新增演员体系、完整度、收藏与设置重构；变更摘要见第 13 节，增量需求见第 14 节）
+> 版本 v0.6（2026-11-20，新增媒体分类、源模板、连通性检测与工程优化；变更摘要见第 13 节，v0.5 增量见第 14 节，v0.6 增量见第 15 节）
 
 ## 1. 项目概述
 
@@ -36,7 +36,7 @@
 │                  Web 前端 (React)                        │
 │   海报墙 · 详情侧边栏 · 元数据编辑 · 源配置 · 设置         │
 └───────────────────────┬─────────────────────────────────┘
-                        │ HTTP REST + SSE
+                        │ HTTP REST（轮询任务状态）
 ┌───────────────────────▼─────────────────────────────────┐
 │                 后端服务 (Python / FastAPI)               │
 │                                                          │
@@ -58,11 +58,13 @@
             本地播放器 mpv / VLC / PotPlayer ...
 ```
 
+> v0.6 补充：后端模块划分与 `vbob/store` 包的职责见 15.7；源模板、连通性检测与批量并发见第 15 节。
+
 ### 2.1 运行形态
 
 - **单机、单进程**：后端内置前端静态资源与 SQLite，直接在本机运行；浏览器访问 `127.0.0.1:8080`。
 - 媒体文件、数据库、播放器都在同一台机器，播放时不需要任何路径转换，也不涉及远程或多设备访问。
-- 支持 Windows/macOS/Linux 桌面环境；可选开机自启、启动后自动打开浏览器。
+- 源码模式可在 Windows/macOS/Linux 运行；公开发布的打包产物目前只有 Windows x64。启动后默认自动打开浏览器，可用 `--no-open` 关闭。
 
 ### 2.2 播放链路
 
@@ -250,9 +252,11 @@ CREATE INDEX idx_jobs_status           ON jobs(status);
 ```
 data/
   vbob.db
-  covers/{video_id}.jpg
+  backups/                       升级前的自动数据库备份（最多保留 5 份）
+  covers/videos/{video_id}.jpg
+  covers/actresses/{actress_id}.jpg
   screenshots/{video_id}.jpg
-  logs/
+  logs/vbob.log
 ```
 
 ### 3.3 设计说明
@@ -272,7 +276,7 @@ data/
 
 ### 4.1 扫描流程
 
-扫描是异步任务（`jobs.type=scan`），由 `POST /api/scans` 触发，前端通过 SSE 或轮询获取进度，可取消。
+扫描是异步任务（`jobs.type=scan`），由 `POST /api/scans` 触发，前端轮询 `GET /api/jobs/{id}` 获取进度，可取消。
 
 1. 遍历每个启用的 `scan_roots`（使用 `os.walk`，不跟随符号链接），规则见 4.2。
 2. 对每个候选文件计算 `path_key`、`size_bytes`、`mtime`。
@@ -449,19 +453,21 @@ deny_title_patterns:              # 可选，覆盖内置错误页特征
 
 ### 6.6 内置源与用户源
 
-- 内置源：随程序分发，`builtin=1`；用户可禁用、可调优先级，不可编辑 `request`/`extract`。
-- 用户源：`builtin=0`，可自由编辑删除。
-- 升级策略：按 `name` 匹配，保留用户 `enabled`/`priority`，替换其余字段并递增 `version`。
+> v0.6 更新：不再区分不可编辑的内置源。首次启动写入的默认源与模板创建的源都是普通源（`builtin=0`），可自由编辑或删除，详见 15.2。
+>
+> - 首次启动按名称补写 `javBus` / `javBusActress`，只执行一次；删除后可用「恢复默认源」或模板重新添加。
+> - 源模板通过 `GET /api/sources/templates` 获取，`POST /api/sources/templates/{key}` 实例化。
 
 ### 6.7 密钥与秘密
 
-- 源的 API key 等秘密不写入共享配置，使用 `{{secret:tmdb_api_key}}` 占位，从设置或环境变量解析。
-- 第一版内置两个源：`javbus`/`javdb` 之一（feature）+ TMDB（query，需用户在设置页填写 key）。
+- 源的 API key 等秘密保存在源配置的 `vars` 中（如 `vars.api_key`），只存在本地 SQLite，不随仓库分发。
+- URL、请求头和请求体用 `{api_key}` 占位，发送前填充；缺失时在发请求前跳过该源并记录原因。
+- 模板中的 `vars` 默认留空，用户创建后点「编辑」填写。
 
 ### 6.8 源测试
 
-- `POST /api/sources/test`：传入配置与一组测试特征，返回请求 URL、HTTP 状态、耗时、提取结果与校验结论。
-- MVP 提供 CLI 子命令 `vbob source test -c source.yaml -f jav_code=SSIS-001`，在无 Web 编辑器的阶段也能高效调试源。
+- 连通性检测：`POST /api/sources/{id}/probe` 与 `POST /api/sources/probe` 请求源站点根路径，返回 0-5 格信号、耗时与 HTTP 状态，详见 15.3。
+- 字段级调试：直接对视频执行刮削，在视频详情「刮削日志」查看每个源的提取结果与失败原因；`_` 前缀字段只用于二次请求，不落库。
 
 ---
 
@@ -469,37 +475,34 @@ deny_title_patterns:              # 可选，覆盖内置错误页特征
 
 ### 7.1 调度流程
 
+> v0.6 更新：本节按当前实现重写，取代初稿中的“feature/query 两轮”流程。
+
 ```
 输入: video（含 features），参数 {force, overwrite_manual}
 输出: metadata | error
 
 1. 读取现有 metadata。
-   若 !force 且待填字段全部在 manual_fields 中：
-       scrape_status=skipped_manual，直接返回。
+   force=False 且资料已完整 → skipped（不发起请求）。
+   reset=True → 先清空非手动字段；overwrite_manual 由调用方选择。
 
-2. 加载所有 enabled 源，按 priority 升序（同优先级按 name 稳定排序）。
+2. 解析本次要执行的源（见 15.1）：
+   视频偏好源 → 目录限定源（按勾选顺序）→ 同分类启用源（按 priority）。
 
-3. 第一轮：feature 类型源
-   for src in sources where src.type == feature:
-       若 src.feature 不在 features 中 → 跳过
-       result = src.Execute()
-       若校验失败（含番号回验不符）→ 记日志，继续
-       若通过 → 合并保存，返回 success
+3. 按顺序执行每个源，逐字段累积（先到先得，不覆盖已有值）：
+   - feature 源缺少对应特征、query 源缺少标题 → 跳过该源；
+   - 源失败 → 记录错误与刮削日志，继续下一个源；
+   - 源成功 → 记录字段与结构化演员链接，继续下一个源。
 
-4. 第二轮：query 类型源（降级）
-   for src in sources where src.type == query:
-       若 features.title 为空 → 跳过
-       result = src.Execute()
-       若校验失败（含标题相似度不足）→ 继续
-       若通过 → 合并保存，返回 success
+4. 所有源都失败/无结果：
+   有网络或解析错误 → failed；否则 → no_match。
 
-5. 全部失败：
-   若存在网络/源执行错误 → scrape_status=failed
-   否则 → scrape_status=no_match
-   写 scrape_logs 并返回 ErrNoMatch。
+5. 有结果时下载封面（受 manual_fields 保护）、合并写入元数据，
+   再按关联演员逐个补全演员资料。
 ```
 
-**优先级语义（明确）**：类型轮次优先于 `priority`。即使某个 query 源的 `priority` 数值小于某个 feature 源，feature 轮也先执行。`priority` 只在同一轮内生效。
+- 源只会因为“没有可用源”而 `no_match`，单个源失败不会中止其他源。
+- 目录未限定源时，只执行与视频分类一致的源；配置失效（源被删除/禁用）返回 `failed` 并给出原因。
+- 手动编辑过的字段默认不被覆盖，`overwrite_manual=True` 时才重写。
 
 ### 7.2 结果合并
 
@@ -517,9 +520,9 @@ deny_title_patterns:              # 可选，覆盖内置错误页特征
 
 ### 7.4 缓存
 
-- 正缓存：键为 `source_name + source.version + match_key`（番号用 `jav_match_key`，query 用归一化标题+年份），默认 TTL 10 分钟，LRU 容量有上限。
-- 负缓存：失败结果缓存 60 秒，避免批量刮削反复冲击同一个坏源。
-- 源配置更新（`version` 变化）后旧缓存自然失效。
+> v0.6 现状：刮削结果缓存尚未实现；设置中的 `cache_ttl_sec` / `negative_ttl_sec` 为预留项。
+>
+> 已实现的是**任务内配置缓存**：一次批量刮削期间缓存启用的源列表与目录配置，避免每个视频重复查库。
 
 ### 7.5 重新刮削与手动编辑
 
@@ -541,46 +544,60 @@ deny_title_patterns:              # 可选，覆盖内置错误页特征
 
 ### 8.1 核心端点
 
+> v0.6 更新：以下为当前实际路由（完整字段以 `/docs` 为准）。
+
 ```
-GET    /api/videos                 列表（分页、搜索、筛选、排序）
-GET    /api/videos/{id}            详情（含 metadata）
-DELETE /api/videos/{id}            删除记录（不删文件）
-POST   /api/videos/{id}/scrape     触发刮削 {force, overwrite_manual}
-PATCH  /api/videos/{id}/metadata   手动编辑 {fields, version}
-PATCH  /api/videos/{id}/features   修正特征 {features, version}
-POST   /api/videos/{id}/play       播放 {player?, seek?}
-GET    /api/videos/{id}/cover      封面（本地缓存或代理下载）
-GET    /api/videos/{id}/screenshot 截图
+GET    /api/videos                    列表（分页、搜索、分类、筛选、排序）
+GET    /api/videos/categories         各分类数量 + all
+GET    /api/videos/{id}               详情（含 metadata、文件、演员）
+DELETE /api/videos/{id}               删除记录并清理本地封面
+POST   /api/videos/{id}/scrape        触发刮削 {force, overwrite_manual, source_id?, remember_source?, reset?}
+PATCH  /api/videos/{id}/metadata      手动编辑 {fields, version}
+PUT    /api/videos/{id}/category      修改媒体分类（标记为手动）
+PATCH  /api/videos/{id}/favorite      收藏
+POST   /api/videos/{id}/play          播放 {file_id?, player?, seek?}
+GET    /api/videos/{id}/cover         封面（本地缓存）
+POST   /api/videos/{id}/cover         上传封面
+PUT    /api/videos/{id}/cover         用 URL 设置封面
+POST   /api/videos/{id}/cover/refresh 用已记录的远端地址重新下载
+GET    /api/videos/{id}/screenshot    截图
 
-POST   /api/scans                  触发扫描 {root_id?, full?} → {job_id}
-GET    /api/scans/{job_id}         兼容别名，等价于 /api/jobs/{id}
+POST   /api/scans                     触发扫描 {root_id?, full?} → {job_id}
+POST   /api/scrapes                   批量刮削 {root_id, force?, overwrite_manual?}
+GET    /api/scrape-logs               刮削日志查询
 
-GET    /api/jobs/{id}              任务状态与进度
-POST   /api/jobs/{id}/cancel       取消任务
-GET    /api/events                 SSE 事件流（任务进度、刮削状态）
+GET    /api/jobs/{id}                 任务状态与进度
+POST   /api/jobs/{id}/cancel          取消任务
 
-GET    /api/settings               读取设置
-PUT    /api/settings               更新设置（校验后生效）
-GET    /api/scan-roots             扫描根目录列表
-POST   /api/scan-roots             新增
-PUT    /api/scan-roots/{id}        修改
-DELETE /api/scan-roots/{id}        删除（不删文件）
+GET    /api/settings                  读取设置
+PUT    /api/settings                  更新设置（校验后生效）
+GET    /api/scan-roots                扫描根目录列表
+POST   /api/scan-roots/pick           打开系统目录选择框
+POST   /api/scan-roots                新增（含分类、限定源、扫描间隔）
+PUT    /api/scan-roots/{id}           修改
+DELETE /api/scan-roots/{id}           删除（不删文件）
+POST   /api/scan-roots/{id}/delete    删除数据/文件
 
-GET    /api/sources                源列表
-POST   /api/sources                新增用户源
-PUT    /api/sources/{id}           编辑源
-DELETE /api/sources/{id}           删除用户源
-PATCH  /api/sources/{id}           启用/优先级调整
-POST   /api/sources/test           测试源配置
+GET    /api/sources                   源列表
+POST   /api/sources                   新增源
+PUT    /api/sources/{id}              编辑源
+DELETE /api/sources/{id}              删除源
+PATCH  /api/sources/{id}              启用/优先级调整
+GET    /api/sources/templates         列出内置模板
+POST   /api/sources/templates/{key}   按模板创建源（同名 409）
+POST   /api/sources/restore-defaults  补齐默认源
+POST   /api/sources/{id}/probe        单个源连通性检测
+POST   /api/sources/probe             并发检测全部源
 
-GET    /api/players                探测本机可用的播放器列表
+GET    /api/players                   探测本机可用的播放器列表
+POST   /api/players/pick              选择播放器可执行文件
 ```
 
 ### 8.2 异步与进度
 
 - 扫描、批量刮削、单文件刮削统一走 `jobs`，返回 `job_id`。
-- 进度通过 `GET /api/jobs/{id}` 或 SSE `/api/events` 推送；SSE 不可用时前端回退到 2 秒轮询。
-- 任务可取消；取消为协作式，扫描在目录边界检查。
+- 进度通过 `GET /api/jobs/{id}` 轮询（前端任务进行中 700ms 一次）；SSE 尚未实现。
+- 任务可取消；取消为协作式：扫描在目录边界检查，批量刮削在下一个视频开始前检查。
 
 ### 8.3 播放接口
 
@@ -613,14 +630,14 @@ POST /api/videos/{id}/play
 
 ### 8.5 图片接口
 
-- 刮削成功时由后端下载封面到 `data/covers/`，下载时带上源配置的 Referer/UA；前端只访问 `/api/videos/{id}/cover`，规避防盗链与跨域。
-- 无封面时返回占位图；截图接口按需查询本地文件，不存在时返回 404。
-- 图片响应支持 `ETag` 与长缓存。
+- 刮削成功时由后端下载封面到 `data/covers/videos/`，演员封面到 `data/covers/actresses/`；下载使用浏览器 UA 并支持源配置的代理，前端只访问本地接口，规避防盗链与跨域。
+- 文件不存在时返回 404；前端在封面缺失时显示占位样式。
+- 图片响应带 `ETag`；带 `?v=` 版本参数时使用长缓存，否则 `no-cache`。
 
 ### 8.6 安全边界
 
 - 默认且推荐只监听 `127.0.0.1`；本工具不面向局域网/公网暴露，第一版不提供鉴权。
-- 写操作使用 JSON `Content-Type` 并校验 `Origin`/`Host`，降低恶意网页跨站调用本地接口的可能。
+- CORS 只放行 Vite 开发地址（`localhost:5173` / `127.0.0.1:5173`）；服务没有鉴权，依赖“仅本机监听”这一前提。
 - 播放只接受"由 `video_id` 解析出的、位于扫描根目录内"的路径，不接受前端传入的文件路径。
 - 用户自定义源可访问任意 URL，存在 SSRF 面；由于仅本机运行，风险由用户自行承担，文档提示不要填写不可信地址。
 
@@ -681,11 +698,13 @@ POST /api/videos/{id}/play
 
 ## 11. 开发路线
 
+> 本节为初稿路线，实际交付范围与顺序以第 13-15 节为准。
+
 ### 第一版（MVP）
 
 按优先级排列，前 7 项为核心：
 
-1. 设置与扫描根目录管理；扫描入库、增量扫描、缺失标记、异步任务与进度（SSE）。
+1. 设置与扫描根目录管理；扫描入库、增量扫描、缺失标记、异步任务与进度（轮询）。
 2. 特征提取（番号/标题/年份、清洗规则、目录名回退）。
 3. 源配置加载与执行引擎：`css`/`xpath`/`json`/`regex`、编码探测、超时/重试/按 host 限流、匹配校验；CLI 源测试命令。
 4. 刮削调度器：两轮降级、番号回验、字段级手动覆盖、并发、缓存、日志。
@@ -726,6 +745,8 @@ POST /api/videos/{id}/play
 ---
 
 ## 13. 相对初稿的主要变更
+
+> 本节记录 v0.5 之前的设计调整；v0.5 与 v0.6 的增量分别见第 14、15 节。
 
 1. **播放链路**：前端只调后端，由后端直接 `exec` 本地播放器；不引入播放助手、WSS、配对与路径映射（v0.3 起明确仅支持单机本地运行）。
 2. **新增配置与任务模型**：新增 `settings`、`scan_roots`、`jobs` 表；扫描/批量刮削全部异步化，支持进度与取消。
@@ -971,3 +992,146 @@ POST   /api/sources/test               视频源与演员源测试
 - 图片格式 jpeg/png/webp，默认上限 10MB。
 - 国家/地区为自由文本；有码状态为 `censored/uncensored/unknown`。
 - 演员别名合并 UI 后续实现，当前先保留 `aliases` 字段并自动创建演员。
+
+---
+
+## 15. v0.6 增量：媒体分类、源模板、检测与工程优化
+
+> 2026-11-20。本节覆盖第 2、3、6、7、8 节中与本节冲突的描述（尤其是 6.6、6.7、6.8、7.1、7.3、7.4），实现以本节为准。
+
+### 15.1 媒体分类与源解析
+
+视频按媒体类型分为 `movie` / `anime` / `series` / `jav` / `other` 五类（`vbob/categories.py`），分类同时作用于目录、源与视频：
+
+- **目录**：`scan_roots.category` 是该目录默认分类；`scan_roots.source_ids` 是 JSON 数组，表示该目录限定的源及其执行顺序。
+- **视频**：`videos.category` 来自目录；用户在详情/编辑里手动改分类后 `category_manual=1`，之后目录改分类不再覆盖。
+- **源**：`sources.category` 限定源只服务某一类媒体。一个源只属于一个分类。
+
+单视频刮削时的源解析顺序（`Scraper._sources_for_video`）：
+
+1. **视频偏好源**：`metadata.source_id` 非空且该源仍启用 → 只执行该源；
+2. **目录限定源**：目录配置了 `source_ids` → 按勾选顺序执行其中仍启用的源，忽略全局优先级；
+3. **分类回退**：执行与视频分类一致的全部启用源，按 `priority` 升序。
+
+偏好源失效（被删除或禁用）时自动清除并继续按目录/分类解析；目录限定的源全部失效时返回 `failed` 并给出原因；分类下没有任何源时返回 `no_match`（不记为失败）。
+只有 `feature` / `query` 类型的源参与视频刮削，`actress` 类型只用于演员资料。
+
+### 15.2 源模板
+
+`vbob/source_templates.py` 内置模板，设置页「从模板添加」一键实例化为普通源（`builtin=0`，可编辑）。模板只含结构，密钥通过 `vars` 占位，由用户填写。
+
+| key | 名称 | 类型 | 分类 | 凭据 |
+| --- | --- | --- | --- | --- |
+| `javbus` | javBus | feature | jav | 无 |
+| `javbus-actress` | javBusActress | actress | jav | 无 |
+| `tmdb-movie` | TMDB 电影 | query | movie | `vars.api_key` |
+| `tmdb-series` | TMDB 剧集 | query | series | `vars.api_key` |
+| `tmdb-anime` | TMDB 动漫 | query | anime | `vars.api_key` |
+| `shikimori-anime` | Shikimori 动漫 | query | anime | 无 |
+| `theporndb` | ThePornDB | query | other | `vars.api_key`（Bearer） |
+
+- `javbus` / `javbus-actress` 直接复用 `default_sources.py` 的配置（深拷贝），保证首次启动的默认源与模板永远一致；删除源后既可用模板重新添加，也可「恢复默认源」。
+- 模板通过 `GET /api/sources/templates` 列出，`POST /api/sources/templates/{key}` 创建；同名源已存在返回 409。
+- 引擎为模板提供的能力：
+  - `vars`：源级常量（如 `api_key`），作为占位符来源，视频特征同名时以特征为准；
+  - `request.body`：POST JSON 请求体，对象/数组先填充占位符再序列化；请求头中的占位符同样替换（`Authorization: Bearer {api_key}`）；
+  - `detail`：二次请求，可用第一次的提取结果拼 URL；`_` 前缀字段只做中间变量；
+  - `asset_base_url`：根相对封面（`/xxx.jpg`）的 CDN 前缀；
+  - `defaults` / `validators` / `deny_title_patterns` / `rate_limit`：默认值、必填校验、错误页识别与按 host 限流。
+
+### 15.3 连通性检测
+
+`vbob/probe.py` 提供“这个源的站点现在通不通”的快速判断，不依赖番号或标题：
+
+- 目标：从 `request.url` 解析 `scheme://host/`，只请求根路径；主机名本身含占位符（如演员源的 `{actress_url}`）时无法确定站点，直接返回说明。
+- 请求沿用源的浏览器请求头、Cookie、代理与超时（上限 15 秒）；缺失密钥的占位符头自动跳过。
+- **任何 HTTP 响应（含 4xx/5xx）都说明网络可达**，状态码只做提示；超时、DNS 失败、连接重置为不可达。
+- 结果按耗时换算为 0-5 格信号：≤300ms 5 格、≤800ms 4 格、≤1.5s 3 格、≤3s 2 格、更慢 1 格、不可达 0 格。
+- 结果写入 `sources.last_test_result_json` 与 `last_test_at`，设置页重新打开仍显示上次检测；单源与全量检测分别对应 `POST /api/sources/{id}/probe` 与 `POST /api/sources/probe`（最多 5 个并发）。
+
+### 15.4 数据模型增量
+
+迁移 `0005_categories.sql`：
+
+```sql
+ALTER TABLE sources     ADD COLUMN category TEXT NOT NULL DEFAULT 'other';
+ALTER TABLE scan_roots  ADD COLUMN category TEXT NOT NULL DEFAULT 'other';
+ALTER TABLE scan_roots  ADD COLUMN source_ids TEXT NOT NULL DEFAULT '[]';  -- JSON：有序源 ID
+ALTER TABLE videos      ADD COLUMN category TEXT NOT NULL DEFAULT 'other';
+ALTER TABLE videos      ADD COLUMN category_manual INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE metadata    ADD COLUMN source_id INTEGER;                     -- 记住的偏好源
+ALTER TABLE metadata    ADD COLUMN source_names TEXT NOT NULL DEFAULT '[]'; -- 本次贡献数据的源列表（JSON）
+CREATE INDEX idx_videos_category ON videos(category);
+```
+
+旧库升级时，已有源与目录统一归类为 `jav`，视频分类由所属目录回填。
+
+迁移 `0006_source_probe.sql`：
+
+```sql
+ALTER TABLE sources ADD COLUMN last_test_result_json TEXT;   -- 最近一次连通性检测结果
+```
+
+### 15.5 批量刮削并发
+
+`scraping.workers`（1-16，默认 3）表示视频维度的并发数，实现在 `Scraper.scrape_root`：
+
+- 一次任务内缓存启用的源与目录配置，避免每个视频重复查库；
+- 每个视频内部仍按解析出的源顺序串行执行，先到先得合并字段；
+- 单视频异常记录日志后继续其余视频；取消时停止派发未开始的任务，已发出的请求等待自然结束（受单次请求超时约束）；
+- 按 host 的 qps 限流状态加锁，保证并发下仍严格遵守 `rate_limit`；
+- 进度回调只在主线程更新，计数不会因并发而错乱。
+
+### 15.6 数据目录维护
+
+- **删除即清理**：删除影片、演员，或彻底删除文件导致记录移除时，同步删除对应封面与截图文件；路径先从数据目录做越界校验。
+- **启动清理**：`Store.cleanup_unused_images()` 扫描 `covers/`、`screenshots/`，删除数据库不再引用的文件；清理失败只记日志，不影响启动。
+- **迁移备份**：存在未应用迁移且数据库非全新时，先用 SQLite 在线备份写到 `backups/vbob-<时间>.db`（保留 5 份），再执行迁移。备份失败不阻塞升级。
+- **图片下载**：统一使用 httpx（`trust_env=False`，支持源配置的代理），流式读取并在超过 10MB 时中止；失败重试 3 次，TMDB 封面在 `w500` 失败后依次尝试 `w780`、`original`。
+- **图片缓存**：封面 URL 带 `?v=<版本>` 时返回 `Cache-Control: private, max-age=604800, immutable`；未带版本（上传后可能被原地覆盖）返回 `no-cache`。
+- **轻量查询**：封面/截图接口只查询所需的一列，不再加载视频详情、文件列表与演员，避免海报墙每张图触发多次查询。
+
+### 15.7 后端结构
+
+`vbob/store` 从单文件拆分为按领域组织的包，`Store` 仍是唯一门面：
+
+```
+vbob/
+  api.py            HTTP 路由与错误映射
+  app.py            FastAPI 装配、错误处理、生命周期
+  scraper.py        刮削编排：源解析、字段合并、封面、演员补全、批量并发
+  probe.py          源连通性检测
+  http_utils.py     共享请求头、占位符填充、Cookie 解析
+  images.py         图片下载、格式校验、本地落盘
+  source_templates.py / default_sources.py
+  store/
+    __init__.py     Store 门面（组合以下 mixin）
+    helpers.py      常量、JSON/空值处理、设置校验、图片删除
+    settings.py     设置读写
+    roots.py        扫描目录、扫描状态与统计
+    sources.py      源 CRUD、模板实例化后的持久化、检测结果
+    videos.py       扫描缓存、文件分组、列表/详情、删除与封面查询
+    metadata.py     元数据合并、分类、偏好源、封面、刮削日志
+    actresses.py    演员资料、收藏、封面
+    jobs.py         任务记录
+    maintenance.py  孤儿图片清理
+```
+
+### 15.8 前端结构
+
+- `App.tsx` 只保留筛选状态与操作编排；列表加载在 `hooks/useLibraryList.ts`，侧栏在 `components/Sidebar.tsx`，导航按钮/筛选标签拆成独立组件，共享的视图类型与排序常量在 `view.ts`。
+- 信号条 `components/SignalBars.tsx` 按等级亮起 5 根竖线，检测中显示脉冲。
+- 通用 `Modal` 支持 Esc 关闭、打开聚焦、Tab 焦点循环与关闭后焦点还原，并带 `role="dialog"` / `aria-modal`；根组件外包 `ErrorBoundary`，渲染异常显示错误页与刷新/重试入口。
+
+### 15.9 工程与发布
+
+- CI（`.github/workflows/ci.yml`）：push master / PR 触发，后端在 Windows 跑 `pytest`，前端在 Ubuntu 跑 `npm ci`、`npm run build`、`npm test`。
+- Release（`.github/workflows/release.yml`）：推送 `v*` 标签触发，先跑 `test` 任务，通过后再构建 PyInstaller 单文件与 zip 并创建 Release。
+- 前端使用 vitest，覆盖展示层纯函数（封面版本参数、字段优先级、格式化）。
+- 版本号需要同步：`pyproject.toml`、`vbob/__init__.py`、`web/package.json`、`web/package-lock.json`、`uv.lock`（项目自身条目）。
+
+### 15.10 兼容与升级
+
+- 启动时自动迁移；旧库的源、目录、视频统一归为 `jav`，可在界面逐项调整。
+- 迁移前自动备份，回滚方式见 `doc/usage.md` 第 9 节。
+- 偏好源被删除或禁用时自动清除，不会阻塞后续刮削。
